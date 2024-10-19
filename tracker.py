@@ -1,9 +1,10 @@
 # tracker.py
+
 import socket
-import pickle
+import json
 import sys
 import threading
-from common import User
+from common import User, Game
 
 if len(sys.argv) != 2:
     print("Usage: python tracker.py <port>")
@@ -12,99 +13,138 @@ if len(sys.argv) != 2:
 HOST = ''
 PORT = int(sys.argv[1])
 
+# Validate port number (Example range: 1500-1999)
+if not (1500 <= PORT <= 1999):
+    print("Port number must be in the range 1500-1999")
+    sys.exit(1)
 
 class Tracker:
     def __init__(self):
         self.players = []
+        self.games = []
+        self.game_id_counter = 0
         self.lock = threading.Lock()
+
+    def handle_command(self, msg, addr, sock):
+        command = msg.get('command', '')
+        method = getattr(self, f"cmd_{command}", None)
+        if method:
+            response = method(msg)
+            sock.sendto(json.dumps(response).encode(), addr)
+        else:
+            error_msg = {"status": "FAILURE", "message": "Unknown command"}
+            sock.sendto(json.dumps(error_msg).encode(), addr)
+
+    def cmd_register(self, msg):
+        return self.register_player(msg['player'], msg['IPv4'], msg['t-port'], msg['p-port'])
+
+    def cmd_query_players(self, msg):
+        return self.query_players()
+
+    def cmd_start_game(self, msg):
+        return self.start_game(msg['player'], msg['n'], msg['#holes'])
+
+    def cmd_query_games(self, msg):
+        return self.query_games()
+
+    def cmd_end_game(self, msg):
+        return self.end_game(msg['game-identifier'], msg['player'])
+
+    def cmd_de_register(self, msg):
+        return self.de_register(msg['player'])
 
     def register_player(self, username, ip, t_port, p_port):
         with self.lock:
-            for player in self.players:
-                if player.username == username:
-                    return "FAILURE: Duplicate username"
+            if any(player.username == username for player in self.players):
+                return {"status": "FAILURE", "message": "Duplicate username"}
             new_player = User(username, ip, t_port, p_port)
             self.players.append(new_player)
-            return "SUCCESS"
+            print(f"DEBUG: Registered player: {new_player}")
+            return {"status": "SUCCESS", "message": "Registered successfully"}
 
     def query_players(self):
         with self.lock:
-            return len(self.players), self.players.copy()
+            return {
+                "status": "SUCCESS",
+                "count": len(self.players),
+                "players": [player.to_dict() for player in self.players]
+            }
+
+    def start_game(self, dealer_name, n, holes):
+        with self.lock:
+            dealer = next((p for p in self.players if p.username == dealer_name and p.state == "free"), None)
+            if not dealer:
+                return {"status": "FAILURE", "message": "Dealer not registered or already in a game"}
+            if n < 1 or n > 3:
+                return {"status": "FAILURE", "message": "Invalid number of players"}
+            available_players = [p for p in self.players if p.state == "free" and p.username != dealer_name]
+            if len(available_players) < n:
+                return {"status": "FAILURE", "message": "Not enough available players"}
+            players = [dealer] + available_players[:n]
+            for player in players:
+                player.state = "in-play"
+            game = Game(dealer, players, self.game_id_counter, holes)
+            self.games.append(game)
+            self.game_id_counter += 1
+            print(f"DEBUG: Started game {game.id} with players: {[p.username for p in players]} and holes: {holes}")
+            return {
+                "status": "SUCCESS",
+                "message": "Game started successfully",
+                "game_id": game.id,
+                "players": [player.to_dict() for player in players],
+                "holes": holes
+            }
 
     def query_games(self):
         with self.lock:
-            # No games are managed in this milestone
-            return 0, []
+            return {
+                "status": "SUCCESS",
+                "count": len(self.games),
+                "games": [game.to_dict() for game in self.games]
+            }
+
+    def end_game(self, game_id, dealer_name):
+        with self.lock:
+            game = next((g for g in self.games if g.id == game_id and g.dealer.username == dealer_name), None)
+            if not game:
+                return {"status": "FAILURE", "message": "Game not found or dealer mismatch"}
+            for player in game.players:
+                player.state = "free"
+            self.games.remove(game)
+            print(f"DEBUG: Ended game {game.id}")
+            return {"status": "SUCCESS", "message": "Game ended successfully"}
 
     def de_register(self, username):
         with self.lock:
-            for player in self.players:
-                if player.username == username:
-                    self.players.remove(player)
-                    return "SUCCESS"
-            return "FAILURE: Player not found"
-
-
-def handle_client(data, addr, tracker, sock):
-    try:
-        msg = pickle.loads(data)
-        command = msg.get('command', '')
-        # Log the message received from the client
-        print(f"\n[Tracker] Received from {addr}: {msg}")
-
-        if command == 'register':
-            result = tracker.register_player(msg['player'], msg['IPv4'], msg['t-port'], msg['p-port'])
-            # Log the response being sent
-            print(f"[Tracker] Sending to {addr}: {result}")
-            sock.sendto(result.encode(), addr)
-
-        elif command == 'query_players':
-            count, players = tracker.query_players()
-            response = {
-                'count': count,
-                'players': players
-            }
-            # Log the response being sent
-            print(f"[Tracker] Sending to {addr}: {response}")
-            sock.sendto(pickle.dumps(response), addr)
-
-        elif command == 'query_games':
-            count, games = tracker.query_games()
-            response = {
-                'count': count,
-                'games': games
-            }
-            # Log the response being sent
-            print(f"[Tracker] Sending to {addr}: {response}")
-            sock.sendto(pickle.dumps(response), addr)
-
-        elif command == 'de_register':
-            result = tracker.de_register(msg['player'])
-            # Log the response being sent
-            print(f"[Tracker] Sending to {addr}: {result}")
-            sock.sendto(result.encode(), addr)
-
-        else:
-            error_msg = "FAILURE: Unknown command"
-            # Log the response being sent
-            print(f"[Tracker] Sending to {addr}: {error_msg}")
-            sock.sendto(error_msg.encode(), addr)
-
-    except Exception as e:
-        print(f"[Tracker] Error with client {addr}: {e}")
-        sock.sendto(b"FAILURE", addr)
-
+            player = next((p for p in self.players if p.username == username), None)
+            if not player:
+                return {"status": "FAILURE", "message": "Player not found"}
+            if player.state == "in-play":
+                return {"status": "FAILURE", "message": "Player is in an ongoing game"}
+            self.players.remove(player)
+            print(f"DEBUG: Deregistered player: {player.username}")
+            return {"status": "SUCCESS", "message": "Deregistered successfully"}
 
 def main():
     tracker = Tracker()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((HOST, PORT))
-    print(f"Tracker listening on port {PORT}")
-
+    try:
+        sock.bind((HOST, PORT))
+    except Exception as e:
+        print(f"DEBUG: Failed to bind to port {PORT}: {e}")
+        sys.exit(1)
+    print(f"DEBUG: Tracker listening on port {PORT}")
     while True:
-        data, addr = sock.recvfrom(4096)
-        threading.Thread(target=handle_client, args=(data, addr, tracker, sock)).start()
-
+        try:
+            data, addr = sock.recvfrom(65535)
+            msg = json.loads(data.decode())
+            threading.Thread(target=tracker.handle_command, args=(msg, addr, sock), daemon=True).start()
+        except KeyboardInterrupt:
+            print("\nDEBUG: Shutting down the tracker.")
+            break
+        except Exception as e:
+            print(f"DEBUG: Error receiving data: {e}")
+    sock.close()
 
 if __name__ == "__main__":
     main()
