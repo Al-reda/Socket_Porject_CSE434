@@ -318,7 +318,16 @@ class Player:
         }
         self.send_message(msg, player.ip, player.p_port)
 
+        # Send acknowledgment mechanism (since UDP is unreliable, this is a simple approach)
+        # Dealer will not proceed until acknowledgment is received
+        # This requires the player to send an acknowledgment upon receiving the hand
+        # However, since UDP does not guarantee delivery, this is a basic implementation
+        # More robust solutions would require retries and sequence numbers
+
     def initialize_hand(self):
+        if len(self.hand) != 6:
+            print(f"{Colors.RED}Error: Hand does not contain 6 cards. Found {len(self.hand)} cards.{Colors.RESET}")
+            return
         self.hand_grid = [self.hand[:3], self.hand[3:]]
         self.card_statuses = [[False]*3 for _ in range(2)]
         indices = [(i, j) for i in range(2) for j in range(3)]
@@ -358,23 +367,51 @@ class Player:
     def print_full_hand(self):
         """Print the hand with all cards revealed."""
         clear_screen()
-        print(f"{Colors.BOLD}{Colors.GREEN}\n=== {self.name}'s Final Hand ==={Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}\n=== {self.name}'s Full Hand ==={Colors.RESET}")
+        
+        # Debugging: Check the structure of hand_grid
+        if not self.hand_grid:
+            print(f"{Colors.RED}Error: hand_grid is empty.{Colors.RESET}")
+            return
+        if len(self.hand_grid) != 2:
+            print(f"{Colors.RED}Error: hand_grid should have 2 rows, found {len(self.hand_grid)}.{Colors.RESET}")
+            return
+        for idx, row in enumerate(self.hand_grid):
+            if len(row) != 3:
+                print(f"{Colors.RED}Error: Row {idx} in hand_grid should have 3 cards, found {len(row)}.{Colors.RESET}")
+                return
+        
+        # Proceed to print the hand
         for row in range(2):
             row_display = ""
             for col in range(3):
                 card = self.hand_grid[row][col]
                 row_display += self.format_card(card.value) + " "
             print(row_display)
+        
+        # Display cumulative scores
+        if self.scores:
+            print(f"\n{Colors.BOLD}{Colors.YELLOW}Final Cumulative Scores:{Colors.RESET}")
+            for player, score in self.scores.items():
+                print(f"{player}: {score}")
         print("=" * 30)
 
     def handle_send_hand(self, msg, addr):
         received_hand = msg.get('hand', [])
         dealer_info = msg.get('dealer_info')
-        if isinstance(received_hand, list):
+        if isinstance(received_hand, list) and len(received_hand) == 6:
             self.hand = [Card(val) for val in received_hand]
             self.initialize_hand()
+            self.trace(f"Hand initialized: {self.hand_grid}")
+            # Send acknowledgment
+            ack_msg = {"status": "SUCCESS", "message": "Hand received and initialized"}
+            self.send_message(ack_msg, addr[0], addr[1])
         else:
             self.trace("Invalid hand data received.")
+            print(f"{Colors.RED}Error: Received invalid hand data.{Colors.RESET}")
+            # Send failure acknowledgment
+            ack_msg = {"status": "FAILURE", "message": "Invalid hand data"}
+            self.send_message(ack_msg, addr[0], addr[1])
         if dealer_info:
             self.dealer_info = User(**dealer_info)
             print(f"Dealer is {self.dealer_info.username}")
@@ -400,14 +437,29 @@ class Player:
         self.game_over = True
         self.in_game = False
         print("\nGame ended!")
-        self.print_full_hand()  # Reveal all cards
+        
+        if self.hand_grid:
+            self.print_full_hand()  # Reveal all cards
+        else:
+            print(f"{Colors.RED}Cannot reveal hand because it is empty.{Colors.RESET}")
+        
         # Receive the final scores
         if 'scores' in msg:
             self.scores = msg['scores']
             winner = msg.get('winner', '')
             self.display_final_scores(winner)
+            if self.hand_grid:
+                self.print_full_hand()  # Ensure all cards are revealed at game end
         else:
             print("Failed to receive final scores.")
+        
+        # Set flags to terminate the game loop
+        self.game_over = True
+        self.in_game = False
+        self.running = False  # Add this line to stop the main loop
+        print(f"{Colors.GREEN}Game has ended gracefully. Exiting...{Colors.RESET}")
+        sys.exit(0)  # Optionally, forcefully exit the program
+
 
     def handle_update_player_state(self, msg, addr):
         with self.lock:
@@ -462,9 +514,12 @@ class Player:
             i, j = position
             if 0 <= i < 2 and 0 <= j < 3:
                 with self.lock:
-                    self.hand_grid[i][j] = Card(swapped_card_value)
-                    self.card_statuses[i][j] = True
-                print(f"Received swapped card {self.format_card(swapped_card_value)} at position ({i}, {j}).")
+                    if i < len(self.hand_grid) and j < len(self.hand_grid[i]):
+                        self.hand_grid[i][j] = Card(swapped_card_value)
+                        self.card_statuses[i][j] = True
+                        print(f"Received swapped card {self.format_card(swapped_card_value)} at position ({i}, {j}).")
+                    else:
+                        print(f"{Colors.RED}Error: Invalid position ({i}, {j}) for swap.{Colors.RESET}")
                 self.print_hand()
             else:
                 self.trace("Invalid position received in swap_card.")
@@ -480,11 +535,13 @@ class Player:
         player_score = msg.get('score', 0)
         with self.lock:
             if player_name in self.scores:
-                self.scores[player_name] += player_score  # Accumulate scores
+                self.scores[player_name] += player_score
             else:
                 self.scores[player_name] = player_score
             if self.is_dealer:
-                self.scores_received.add(player_name)  # Add player's name to scores_received
+                self.scores_received.add(player_name)
+                self.trace(f"Received score from {player_name}: {player_score}")
+                print(f"{Colors.GREEN}Received score from {player_name}: {player_score}{Colors.RESET}")
 
     def handle_player_done(self, msg, addr):
         player_name = msg.get('player')
@@ -497,19 +554,27 @@ class Player:
         # Handle end of hole message from the dealer
         self.scores = msg.get('scores', self.scores)
         self.display_current_scores()
+        if self.hand_grid:
+            self.print_full_hand()  # Reveal all cards
+        else:
+            print(f"{Colors.RED}Cannot reveal hand because it is empty.{Colors.RESET}")
         self.hole_over = True
 
     def manage_turns(self):
         # Initialize cumulative scores
-        self.scores = {player.username: 0 for player in self.players_info}
+        with self.lock:
+            self.scores = {player.username: 0 for player in self.players_info}
         for hole in range(1, self.holes + 1):
-            self.current_hole = hole
+            with self.lock:
+                self.current_hole = hole
             print(f"\n{Colors.BOLD}{Colors.GREEN}=== Starting Hole {hole}/{self.holes} ==={Colors.RESET}")
             self.setup_hole()
-            self.players_done = set()
-            self.hole_over = False
+            with self.lock:
+                self.players_done = set()
+                self.hole_over = False
             while not self.hole_over and self.running:
-                current_player = self.players_info[self.current_player_index]
+                with self.lock:
+                    current_player = self.players_info[self.current_player_index]
                 print(f"\nIt's {Colors.CYAN}{current_player.username}{Colors.RESET}'s turn.")
                 if current_player.username == self.name:
                     with self.lock:
@@ -526,7 +591,8 @@ class Player:
                 self.turn_event.wait()
                 self.turn_event.clear()
                 if self.check_hole_end():
-                    self.hole_over = True
+                    with self.lock:
+                        self.hole_over = True
                     break
                 with self.lock:
                     self.current_player_index = (self.current_player_index + 1) % len(self.players_info)
@@ -566,20 +632,36 @@ class Player:
             # Hole ends when any player is done (can be modified as per game rules)
             return len(self.players_done) >= 1
 
+    def wait_for_scores(self, timeout=30):
+        """Wait for all players to send their scores with a timeout."""
+        start_time = time.time()
+        while True:
+            with self.lock:
+                if len(self.scores_received) >= len(self.players_info):
+                    return
+            if time.time() - start_time > timeout:
+                print(f"{Colors.RED}Timeout reached while waiting for scores.{Colors.RESET}")
+                return
+            time.sleep(0.5)  # Sleep briefly to avoid busy waiting
+
     def end_hole(self):
         self.calculate_score()
         print(f"\nScore for {self.name} in hole {self.current_hole}: {self.score}")
         if self.is_dealer:
             with self.lock:
                 self.scores[self.name] += self.score  # Accumulate dealer's own score
-            self.scores_received = set([self.name])  # Include dealer's own name
+                self.scores_received = set([self.name])  # Include dealer's own name
             for player in self.players_info:
                 if player.username != self.name:
                     msg = {'command': 'send_score'}
                     self.send_message(msg, player.ip, player.p_port)
-            # Wait for all scores to be collected
-            while len(self.scores_received) < len(self.players_info):
-                time.sleep(0.1)
+            # Wait for all scores to be collected with timeout
+            self.wait_for_scores(timeout=30)  # Wait for 30 seconds
+            with self.lock:
+                # Proceed even if not all scores are received
+                missing_players = [p.username for p in self.players_info if p.username not in self.scores_received]
+                if missing_players:
+                    print(f"{Colors.YELLOW}Did not receive scores from: {', '.join(missing_players)}{Colors.RESET}")
             # Send end_hole message with current scores
             end_hole_msg = {
                 'command': 'end_hole',
@@ -590,17 +672,33 @@ class Player:
                     self.send_message(end_hole_msg, player.ip, player.p_port)
             # Display current scores with Current Player Score label
             self.display_current_scores()
+            # Reveal all cards for the dealer
+            if self.hand_grid:
+                self.print_full_hand()  # Dealer reveals their own cards
             # Display results for 10 seconds before proceeding
             print(f"\nNext hole will start in 10 seconds...")
             time.sleep(10)
-            self.hole_over = True
+            with self.lock:
+                self.hole_over = True
         else:
             self.send_score((self.dealer_info.ip, self.dealer_info.p_port))
-            # Wait for hole_over signal
-            while not self.hole_over and self.running:
-                time.sleep(0.1)
+            # Wait for hole_over signal with timeout
+            start_time = time.time()
+            timeout = 30  # 30 seconds timeout
+            while True:
+                with self.lock:
+                    if self.hole_over:
+                        break
+                if time.time() - start_time > timeout:
+                    print(f"{Colors.RED}Timeout reached while waiting for end of hole.{Colors.RESET}")
+                    break
+                time.sleep(0.5)
             # Display results for 10 seconds before proceeding
             print(f"\nNext hole will start in 10 seconds...")
+            if self.hand_grid:
+                self.print_full_hand()  # Non-dealer players reveal their own cards
+            else:
+                print(f"{Colors.RED}Cannot reveal hand because it is empty.{Colors.RESET}")
             time.sleep(10)
         if self.running:
             self.reset_for_next_hole()
@@ -644,12 +742,22 @@ class Player:
             for player in self.players_info:
                 if player.username != self.name:
                     self.send_message(end_game_msg, player.ip, player.p_port)
+        # Send end_game to tracker
         msg = {'command': 'end_game', 'game-identifier': self.game_id, 'player': self.name}
         response = self.send_to_tracker(msg)
         if response:
             print(response.get('message', ''))
+        if self.hand_grid:
+            self.print_full_hand()  # Reveal all cards at game end
+        else:
+            print(f"{Colors.RED}Cannot reveal hand because it is empty.{Colors.RESET}")
+        # Set flags to terminate the game loop
         self.game_over = True
         self.in_game = False
+        self.running = False  # Add this line to stop the main loop
+        print(f"{Colors.GREEN}Game has ended gracefully. Exiting...{Colors.RESET}")
+        sys.exit(0)  # Optionally, forcefully exit the program
+
 
     def calculate_score(self):
         total = 0
@@ -884,10 +992,16 @@ class Player:
                     return
 
                 i, j = place_position
-                swapped_card = self.hand_grid[i][j]
-                self.hand_grid[i][j] = stolen_card
-                self.card_statuses[i][j] = True
-                print(f"Swapped {self.format_card(swapped_card.value)} with {self.format_card(stolen_card.value)}.")
+                with self.lock:
+                    if i < len(self.hand_grid) and j < len(self.hand_grid[i]):
+                        swapped_card = self.hand_grid[i][j]
+                        self.hand_grid[i][j] = stolen_card
+                        self.card_statuses[i][j] = True
+                        print(f"Swapped {self.format_card(swapped_card.value)} with {self.format_card(stolen_card.value)}.")
+                    else:
+                        print(f"{Colors.RED}Error: Invalid position ({i}, {j}) for swapping.{Colors.RESET}")
+                        self.end_turn()
+                        return
 
                 # Send the swapped card back to the target player with the target's original position
                 swap_msg = {
@@ -986,6 +1100,7 @@ class Player:
 {Colors.BLUE}========================={Colors.RESET}
 """
         print(help_text)
+
 
 if __name__ == '__main__':
     if len(sys.argv) != 6:
