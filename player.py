@@ -7,59 +7,57 @@ import sys
 import random
 import os
 import time
-from common import User, Game
+import logging
+from common import User, Game, Card, Deck
+from typing import List, Dict
 
-TRACE = False  # Set to True to enable message tracing
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+TRACE = True  # Enable detailed tracing for debugging
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
-class Card:
-    def __init__(self, value):
-        self.value = value  # e.g., 'AS', '10D', 'KC'
-
-    def __repr__(self):
-        return self.value
-
-class Deck:
-    def __init__(self):
-        suits = ['C', 'D', 'H', 'S']
-        values = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
-        self.cards = [Card(f"{v}{s}") for s in suits for v in values]
-        self.shuffle()
-
-    def shuffle(self):
-        random.shuffle(self.cards)
-
 class Player:
-    def __init__(self, tracker_ip, tracker_port, t_port, p_port, group_number):
+    def __init__(self, tracker_ip: str, tracker_port: int, t_port: int, p_port: int, group_number: int):
         self.tracker_ip = tracker_ip
         self.tracker_port = tracker_port
         self.t_port = t_port
         self.p_port = p_port
         self.group_number = group_number
         self.name = None
-        self.hand = []
+        self.hand: List[Card] = []
         self.score = 0
         self.t_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.t_sock.bind(('', self.t_port))
+        try:
+            self.t_sock.bind(('', self.t_port))
+            logging.debug(f"t_sock bound to port {self.t_port}")
+        except OSError as e:
+            logging.error(f"Error binding t_port {self.t_port}: {e}")
+            sys.exit(1)
         self.p_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.p_sock.bind(('', self.p_port))
-        self.players_info = []
+        try:
+            self.p_sock.bind(('', self.p_port))
+            logging.debug(f"p_sock bound to port {self.p_port}")
+        except OSError as e:
+            logging.error(f"Error binding p_port {self.p_port}: {e}")
+            sys.exit(1)
+        self.players_info: List[User] = []
         self.game_id = None
         self.holes = 0
         self.is_dealer = False
-        self.stock_pile = []
-        self.discard_pile = []
-        self.hand_grid = []
-        self.card_statuses = []
+        self.stock_pile: List[Card] = []
+        self.discard_pile: List[Card] = []
+        self.hand_grid: List[List[Card]] = []
+        self.card_statuses: List[List[bool]] = []
         self.current_player_index = 0
         self.game_over = False
         self.lock = threading.Lock()
-        self.dealer_info = None
-        self.scores = {}
+        self.dealer_info: User = None
+        self.scores: Dict[str, int] = {}
         self.running = True
-        self.players_done = set()
+        self.players_done: set = set()
         self.in_game = False
 
         # Flags and data for thread communication
@@ -78,14 +76,14 @@ class Player:
         self.port_max = base_port + 499
 
         if not (self.port_min <= self.t_port <= self.port_max) or not (self.port_min <= self.p_port <= self.port_max):
-            print(f"Port numbers must be in the range {self.port_min}-{self.port_max} for group {self.group_number}")
+            logging.error(f"Port numbers must be in the range {self.port_min}-{self.port_max} for group {self.group_number}")
             sys.exit(1)
 
-    def trace(self, message):
+    def trace(self, message: str):
         if TRACE:
-            print(f"[TRACE] {message}")
+            logging.debug(f"[TRACE] {message}")
 
-    def get_local_ip(self):
+    def get_local_ip(self) -> str:
         """Retrieve the local IP address of the machine."""
         try:
             # Connect to a public DNS server to get the local IP address
@@ -93,10 +91,10 @@ class Player:
                 s.connect(("8.8.8.8", 80))
                 return s.getsockname()[0]
         except Exception as e:
-            print(f"Error obtaining local IP: {e}")
+            logging.error(f"Error obtaining local IP: {e}")
             return "127.0.0.1"  # Fallback to localhost
 
-    def send_message(self, msg, ip, port, expect_response=False, timeout=5):
+    def send_message(self, msg: dict, ip: str, port: int, expect_response: bool = False, timeout: int = 5) -> dict:
         self.trace(f"Sending to {ip}:{port}: {msg}")
         try:
             sock = self.t_sock if port == self.tracker_port else self.p_sock
@@ -107,14 +105,14 @@ class Player:
                 self.trace(f"Received from {ip}:{port}: {data}")
                 return json.loads(data.decode())
         except socket.timeout:
-            print("No response from server. Please try again later.")
+            logging.warning("No response from server. Please try again later.")
         except Exception as e:
-            print(f"Error communicating with {ip}:{port}: {e}")
+            logging.error(f"Error communicating with {ip}:{port}: {e}")
         finally:
             sock.settimeout(None)
-        return None
+        return {}
 
-    def send_to_tracker(self, msg):
+    def send_to_tracker(self, msg: dict) -> dict:
         return self.send_message(msg, self.tracker_ip, self.tracker_port, expect_response=True)
 
     def register(self):
@@ -124,6 +122,7 @@ class Player:
         self.name = input("Enter your username: ").strip()
         if not self.name:
             print("Username cannot be empty.")
+            self.name = None
             return
         local_ip = self.get_local_ip()
         msg = {
@@ -170,7 +169,7 @@ class Player:
         else:
             print("Failed to query games.")
 
-    def display_players(self, players):
+    def display_players(self, players: List[dict]):
         clear_screen()
         print(f"=== Player List ({len(players)} players) ===")
         print(f"{'Username':<15}{'IP':<15}{'T-Port':<10}{'P-Port':<10}{'State':<10}")
@@ -179,7 +178,7 @@ class Player:
             print(f"{player['username']:<15}{player['ip']:<15}{player['t_port']:<10}{player['p_port']:<10}{player['state']:<10}")
         print("-" * 60)
 
-    def display_games(self, games):
+    def display_games(self, games: List[dict]):
         clear_screen()
         print(f"=== Game List ({len(games)} games) ===")
         for game in games:
@@ -202,28 +201,14 @@ class Player:
         msg = {'command': 'start_game', 'player': self.name, 'n': n, '#holes': holes}
         response = self.send_to_tracker(msg)
         if response and response.get('status') == 'SUCCESS':
-            self.setup_game(response)
+            # No need to handle setup here; players will be notified automatically
+            print("Game started successfully. Players have been notified.")
         else:
             print(f"Failed to start game: {response.get('message', '') if response else ''}")
 
-    def join_game(self):
-        if not self.name:
-            print("You must register first.")
-            return
-        msg = {'command': 'query_games'}
-        response = self.send_to_tracker(msg)
-        if response and response.get('status') == 'SUCCESS':
-            games = response.get('games', [])
-            my_games = [game for game in games if any(p['username'] == self.name for p in game['players'])]
-            if my_games:
-                self.setup_joined_game(my_games[0])
-                # No longer need to wait in join_game; main loop will handle it
-            else:
-                print("You are not part of any ongoing game.")
-        else:
-            print("Failed to query games.")
+    # Removed join_game method and related functionalities
 
-    def setup_game(self, response):
+    def setup_game(self, response: dict):
         self.game_id = response.get('game_id')
         self.players_info = [User(**player) for player in response.get('players', [])]
         self.holes = response.get('holes', 0)
@@ -236,41 +221,208 @@ class Player:
         self.in_game = True
         threading.Thread(target=self.play_game, daemon=True).start()
 
-    def setup_joined_game(self, game):
-        self.game_id = game['id']
-        self.players_info = [User(**player) for player in game['players']]
-        self.holes = game['holes']
-        self.is_dealer = (game['dealer']['username'] == self.name)
-        self.dealer_info = next((p for p in self.players_info if p.username == game['dealer']['username']), None)
-        self.scores = {player.username: 0 for player in self.players_info}
-        print(f"Joined game {self.game_id} with players: {[player.username for player in self.players_info]}")
-        self.start_listening()
-        self.in_game = True
+    # Removed setup_joined_game method
+
+    def handle_assigned_game(self, msg: dict, addr):
+        logging.debug("Received 'assigned_game' message.")
+        game_id = msg.get('game_id')
+        dealer_info = msg.get('dealer')
+        players = msg.get('players', [])
+        holes = msg.get('holes', 0)
+
+        logging.debug(f"Validating 'assigned_game' message fields:")
+        logging.debug(f"game_id: {game_id}")
+        logging.debug(f"dealer_info: {dealer_info}")
+        logging.debug(f"players: {players}")
+        logging.debug(f"holes: {holes}")
+
+        if game_id is None:
+            self.trace("Invalid assigned_game message: 'game_id' is missing.")
+            return
+        if dealer_info is None:
+            self.trace("Invalid assigned_game message: 'dealer' info is missing.")
+            return
+        if not players:
+            self.trace("Invalid assigned_game message: 'players' list is empty.")
+            return
+        if holes <= 0:
+            self.trace("Invalid assigned_game message: 'holes' must be greater than 0.")
+            return
+
+        with self.lock:
+            self.game_id = game_id
+            self.holes = holes
+            self.players_info = [User(**player) for player in players]
+            self.dealer_info = User(**dealer_info) if dealer_info else None
+            self.is_dealer = (self.name == self.dealer_info.username)
+            self.scores = {player.username: 0 for player in self.players_info}
+            self.score = 0
+            self.players_done = set()
+            self.game_over = False
+            self.in_game = True
+
+        print(f"\n=== Assigned to Game {self.game_id} ===")
+        print(f"Dealer: {self.dealer_info.username}")
+        print(f"Players: {[player.username for player in self.players_info]}")
+        print(f"Holes: {self.holes}")
+
+        if self.is_dealer:
+            threading.Thread(target=self.play_game, daemon=True).start()
+        else:
+            print("Waiting for the dealer to distribute hands...")
+
+    def handle_send_hand(self, msg: dict, addr):
+        logging.debug("Handling 'send_hand' message.")
+        received_hand = msg.get('hand', [])
+        dealer_info = msg.get('dealer_info')
+        if isinstance(received_hand, list):
+            self.hand = [Card(val) for val in received_hand]
+            self.initialize_hand()
+        else:
+            self.trace("Invalid hand data received.")
+        if dealer_info:
+            self.dealer_info = User(**dealer_info)
+            print(f"Dealer is {self.dealer_info.username}")
+        else:
+            print("Failed to receive dealer information.")
+
+    def handle_your_turn(self, msg: dict, addr):
+        logging.debug("Handling 'your_turn' message.")
+        with self.lock:
+            self.stock_pile = [Card(val) for val in msg.get('stock_pile', [])]
+            self.discard_pile = [Card(val) for val in msg.get('discard_pile', [])]
+            self.current_player_index = msg.get('current_player_index', 0)
+            self.is_my_turn = True
+            self.turn_data = msg
+        self.trace("Updated stock_pile and discard_pile for turn.")
+
+    def handle_update_piles(self, msg: dict, addr):
+        logging.debug("Handling 'update_piles' message.")
+        with self.lock:
+            self.stock_pile = [Card(val) for val in msg.get('stock_pile', [])]
+            self.discard_pile = [Card(val) for val in msg.get('discard_pile', [])]
+        self.print_hand()
+
+    def handle_end_game(self, msg: dict, addr):
+        logging.debug("Handling 'end_game' message.")
+        self.game_over = True
+        self.in_game = False
+        print("\nGame ended!")
+        self.print_full_hand()  # Reveal all cards
+        self.calculate_score()  # Calculate score based on all cards
+        # Receive the scores from the dealer
+        if 'scores' in msg:
+            self.scores = msg['scores']
+            winner = msg.get('winner', '')
+            self.display_final_scores(winner)
+        else:
+            self.scores = {self.name: self.score}
+            self.display_final_scores()
+
+    def handle_update_player_state(self, msg: dict, addr):
+        logging.debug("Handling 'update_player_state' message.")
+        with self.lock:
+            self.current_player_index = msg.get('current_player_index', 0)
+            players = msg.get('players', [])
+            if players:
+                self.players_info = [User(**player) for player in players]
+        self.trace(f"Updated current_player_index to {self.current_player_index}")
+
+    def handle_turn_over(self, msg: dict, addr):
+        logging.debug("Handling 'turn_over' message.")
+        if self.is_dealer:
+            self.turn_event.set()
+            self.trace("Turn event set by 'turn_over'.")
+        else:
+            self.trace(f"Received turn_over from {addr}, but not the dealer.")
+
+    def handle_steal_card(self, msg: dict, addr):
+        logging.debug("Handling 'steal_card' message.")
+        from_player = msg.get('from_player')
+        face_up_cards = [(i, j) for i in range(2) for j in range(3) if self.card_statuses[i][j]]
+        if not face_up_cards:
+            response = {'command': 'steal_response', 'card': None}
+        else:
+            i, j = random.choice(face_up_cards)
+            stolen_card = self.hand_grid[i][j]
+            self.card_statuses[i][j] = False
+            response = {'command': 'steal_response', 'card': stolen_card.value}
+            print(f"{from_player} stole your {stolen_card}")
+            self.print_hand()
+        self.send_message(response, addr[0], addr[1])
+
+    def handle_steal_response(self, msg: dict, addr):
+        logging.debug("Handling 'steal_response' message.")
+        with self.steal_lock:
+            self.steal_response = msg
+            self.steal_event.set()
+
+    def handle_send_score(self, msg: dict, addr):
+        logging.debug("Handling 'send_score' message.")
+        self.send_score(addr)
+
+    def handle_score_response(self, msg: dict, addr):
+        logging.debug("Handling 'score_response' message.")
+        player_name = msg.get('player')
+        player_score = msg.get('score', 0)
+        with self.lock:
+            self.scores[player_name] = player_score
+            if len(self.scores) == len(self.players_info):
+                self.declare_winner()
+
+    def handle_player_done(self, msg: dict, addr):
+        logging.debug("Handling 'player_done' message.")
+        player_name = msg.get('player')
+        with self.lock:
+            self.players_done.add(player_name)
+            if self.is_dealer and self.check_game_end():
+                self.game_over = True
+                self.in_game = False
+                self.end_game(self.game_id)
+
+    def listen_for_player_messages(self):
+        logging.debug("Listening for player messages...")
+        while not self.game_over and self.running:
+            try:
+                data, addr = self.p_sock.recvfrom(65535)
+                msg = json.loads(data.decode())
+                command = msg.get('command', '')
+                logging.debug(f"Received message from {addr}: {msg}")
+                handler = getattr(self, f"handle_{command}", None)
+                if handler:
+                    handler(msg, addr)
+                else:
+                    logging.warning(f"Unknown command received: {command}")
+            except Exception as e:
+                logging.error(f"Error in listen_for_player_messages: {e}")
 
     def start_listening(self):
-        if not hasattr(self, 'listener_thread'):
+        if not hasattr(self, 'listener_thread') or not self.listener_thread.is_alive():
             self.listener_thread = threading.Thread(target=self.listen_for_player_messages, daemon=True)
             self.listener_thread.start()
+            logging.debug("Listener thread started.")
 
-    def get_numeric_input(self, prompt, min_value, max_value):
-        try:
-            value = int(input(prompt))
-            if min_value <= value <= max_value:
-                return value
-            else:
-                print(f"Value must be between {min_value} and {max_value}.")
-        except ValueError:
-            print("Invalid input.")
-        return None
+    def get_numeric_input(self, prompt: str, min_value: int, max_value: int) -> int:
+        while True:
+            try:
+                value = int(input(prompt))
+                if min_value <= value <= max_value:
+                    return value
+                else:
+                    print(f"Value must be between {min_value} and {max_value}.")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
 
     def play_game(self):
         if self.is_dealer:
+            logging.debug("Dealer is setting up the game.")
             deck = Deck()
             self.stock_pile = deck.cards.copy()
             hands = {}
             for player in self.players_info:
                 hand = [self.stock_pile.pop() for _ in range(6)]
                 hands[player.username] = hand
+            # Send hands and dealer info to all players
             for player in self.players_info:
                 if player.username != self.name:
                     self.send_hand(player, hands[player.username])
@@ -281,17 +433,20 @@ class Player:
             self.discard_pile.append(top_card)
             print(f"Initial discard pile top card: {top_card}")
             self.current_player_index = 0
+            # Start the turn management in a separate thread
             threading.Thread(target=self.manage_turns, daemon=True).start()
         else:
             # Non-dealer players just wait; their turns will be handled in the main loop
             pass
 
-    def send_hand(self, player, hand):
+    def send_hand(self, player: User, hand: List[Card]):
         msg = {
             'command': 'send_hand',
-            'hand': [card.value for card in hand]
+            'hand': [card.value for card in hand],
+            'dealer_info': self.dealer_info.to_dict()
         }
         self.send_message(msg, player.ip, player.p_port)
+        logging.debug(f"Sent hand to {player.username}.")
 
     def initialize_hand(self):
         self.hand_grid = [self.hand[:3], self.hand[3:]]
@@ -317,105 +472,24 @@ class Player:
         print("\nDiscard Pile Top Card:", self.discard_pile[-1] if self.discard_pile else "Empty")
         print("="*30)
 
-    def listen_for_player_messages(self):
-        while not self.game_over and self.running:
-            try:
-                data, addr = self.p_sock.recvfrom(65535)
-                msg = json.loads(data.decode())
-                command = msg.get('command', '')
-                self.trace(f"Received message from {addr}: {msg}")
-                handler = getattr(self, f"handle_{command}", None)
-                if handler:
-                    handler(msg, addr)
-                else:
-                    print(f"Unknown command received: {command}")
-            except Exception as e:
-                self.trace(f"Error in listen_for_player_messages: {e}")
-
-    def handle_send_hand(self, msg, addr):
-        received_hand = msg.get('hand', [])
-        if isinstance(received_hand, list):
-            self.hand = [Card(val) for val in received_hand]
-            self.initialize_hand()
-        else:
-            self.trace("Invalid hand data received.")
-
-    def handle_your_turn(self, msg, addr):
-        with self.lock:
-            self.stock_pile = [Card(val) for val in msg.get('stock_pile', [])]
-            self.discard_pile = [Card(val) for val in msg.get('discard_pile', [])]
-            self.current_player_index = msg.get('current_player_index', 0)
-            self.is_my_turn = True
-            self.turn_data = msg  # Store any additional data if needed
-
-    def handle_update_piles(self, msg, addr):
-        with self.lock:
-            self.stock_pile = [Card(val) for val in msg.get('stock_pile', [])]
-            self.discard_pile = [Card(val) for val in msg.get('discard_pile', [])]
-        self.print_hand()
-
-    def handle_end_game(self, msg, addr):
-        self.game_over = True
-        self.in_game = False
-        print("\nGame ended!")
-        self.display_final_scores()
-
-    def handle_update_player_state(self, msg, addr):
-        with self.lock:
-            self.current_player_index = msg.get('current_player_index', 0)
-            players = msg.get('players', [])
-            if players:
-                self.players_info = [User(**player) for player in players]
-        self.trace(f"Updating current_player_index to {self.current_player_index}")
-
-    def handle_turn_over(self, msg, addr):
-        if self.is_dealer:
-            self.turn_event.set()
-
-    def handle_steal_card(self, msg, addr):
-        # Process the steal request immediately
-        from_player = msg.get('from_player')
-        face_up_cards = [(i, j) for i in range(2) for j in range(3) if self.card_statuses[i][j]]
-        if not face_up_cards:
-            response = {'command': 'steal_response', 'card': None}
-        else:
-            i, j = random.choice(face_up_cards)
-            stolen_card = self.hand_grid[i][j]
-            self.card_statuses[i][j] = False
-            response = {'command': 'steal_response', 'card': stolen_card.value}
-            print(f"{from_player} stole your {stolen_card}")
-            self.print_hand()
-        self.send_message(response, addr[0], addr[1])
-
-    def handle_steal_response(self, msg, addr):
-        with self.steal_lock:
-            self.steal_response = msg
-            self.steal_event.set()
-
-    def handle_send_score(self, msg, addr):
-        self.send_score(addr)
-
-    def handle_score_response(self, msg, addr):
-        player_name = msg.get('player')
-        player_score = msg.get('score', 0)
-        with self.lock:
-            self.scores[player_name] = player_score
-            if len(self.scores) == len(self.players_info):
-                self.declare_winner()
-
-    def handle_player_done(self, msg, addr):
-        player_name = msg.get('player')
-        with self.lock:
-            self.players_done.add(player_name)
-            if self.is_dealer and self.check_game_end():
-                self.game_over = True
-                self.in_game = False
-                self.end_game(self.game_id)
+    def print_full_hand(self):
+        """Print the hand with all cards revealed."""
+        clear_screen()
+        print(f"\n=== {self.name}'s Final Hand ===")
+        for row in range(2):
+            row_display = ""
+            for col in range(3):
+                card = self.hand_grid[row][col]
+                row_display += f"{card.value:<4} "
+            print(row_display)
+        print("="*30)
 
     def manage_turns(self):
+        logging.debug("Managing turns.")
         self.scores = {player.username: 0 for player in self.players_info}
         while not self.game_over and self.running:
             current_player = self.players_info[self.current_player_index]
+            print(f"\nIt's {current_player.username}'s turn.")
             if current_player.username == self.name:
                 with self.lock:
                     self.is_my_turn = True
@@ -427,6 +501,8 @@ class Player:
                     'current_player_index': self.current_player_index
                 }
                 self.send_message(msg, current_player.ip, current_player.p_port)
+                logging.debug(f"Sent 'your_turn' message to {current_player.username}.")
+
             self.turn_event.wait()
             self.turn_event.clear()
             if self.check_game_end():
@@ -439,6 +515,7 @@ class Player:
             self.update_player_state()
 
     def play_turn(self):
+        logging.debug("play_turn() invoked.")
         self.print_hand()
         print(f"\n=== {self.name}'s Turn ===")
         print(f"Discard Pile Top Card: {self.discard_pile[-1]}")
@@ -458,14 +535,16 @@ class Player:
             self.draw_from_discard()
         elif choice == '3':
             self.steal_card()
+        logging.debug("play_turn() completed.")
 
     def draw_from_stock(self):
         with self.lock:
             if not self.stock_pile:
                 if len(self.discard_pile) > 1:
-                    self.stock_pile = self.discard_pile[:-1]
+                    self.stock_pile = [Card(val) for val in self.discard_pile[:-1]]
                     self.discard_pile = [self.discard_pile[-1]]
                     random.shuffle(self.stock_pile)
+                    print("DEBUG: Re-shuffled discard pile into stock pile.")
                 else:
                     print("No cards left to draw.")
                     self.end_turn()
@@ -484,7 +563,7 @@ class Player:
         print(f"You picked up {drawn_card} from discard pile")
         self.handle_drawn_card(drawn_card)
 
-    def handle_drawn_card(self, drawn_card):
+    def handle_drawn_card(self, drawn_card: Card):
         while True:
             action = input("Do you want to (1) Swap or (2) Discard? ").strip()
             if action == '1':
@@ -516,17 +595,22 @@ class Player:
             if self.is_dealer:
                 with self.lock:
                     self.players_done.add(self.name)
+                if self.check_game_end():
+                    self.game_over = True
+                    self.in_game = False
+                    self.end_game(self.game_id)
             else:
                 self.notify_dealer_player_done()
         self.end_turn()
 
-    def is_all_cards_face_up(self):
+    def is_all_cards_face_up(self) -> bool:
         return all([status for row in self.card_statuses for status in row])
 
     def notify_dealer_player_done(self):
         if not self.is_dealer:
             msg = {'command': 'player_done', 'player': self.name}
             self.send_message(msg, self.dealer_info.ip, self.dealer_info.p_port)
+            logging.debug(f"Notified dealer {self.dealer_info.username} that you are done.")
 
     def steal_card(self):
         print("\nPlayers you can steal from:")
@@ -551,6 +635,7 @@ class Player:
             return
         msg = {'command': 'steal_card', 'from_player': self.name}
         self.send_message(msg, target_player.ip, target_player.p_port)
+        logging.debug(f"Sent 'steal_card' message to {target_player.username}.")
         self.steal_event = threading.Event()
         if self.steal_event.wait(timeout=10):  # Wait for steal response
             with self.steal_lock:
@@ -569,9 +654,11 @@ class Player:
     def end_turn(self):
         if self.is_dealer:
             self.turn_event.set()
+            logging.debug("Dealer has ended their turn.")
         else:
             msg = {'command': 'turn_over'}
             self.send_message(msg, self.dealer_info.ip, self.dealer_info.p_port)
+            logging.debug("Notified dealer that your turn is over.")
 
     def update_piles(self):
         msg = {
@@ -583,6 +670,7 @@ class Player:
             for player in self.players_info:
                 if player.username != self.name:
                     self.send_message(msg, player.ip, player.p_port)
+                    logging.debug(f"Sent 'update_piles' message to {player.username}.")
 
     def update_player_state(self):
         msg = {
@@ -594,12 +682,13 @@ class Player:
             for player in self.players_info:
                 if player.username != self.name:
                     self.send_message(msg, player.ip, player.p_port)
+                    logging.debug(f"Sent 'update_player_state' message to {player.username}.")
 
-    def check_game_end(self):
+    def check_game_end(self) -> bool:
         with self.lock:
-            return len(self.players_done) == len(self.players_info)
+            return len(self.players_done) >= 1  # Game ends when any player is done
 
-    def end_game(self, game_id):
+    def end_game(self, game_id: int):
         self.calculate_score()
         print(f"\nFinal score for {self.name}: {self.score}")
         if self.is_dealer:
@@ -609,12 +698,16 @@ class Player:
                 if player.username != self.name:
                     msg = {'command': 'send_score'}
                     self.send_message(msg, player.ip, player.p_port)
+                    logging.debug(f"Sent 'send_score' message to {player.username}.")
         else:
             self.send_score((self.dealer_info.ip, self.dealer_info.p_port))
+        self.game_over = True
+        self.in_game = False
 
-    def send_score(self, addr):
+    def send_score(self, addr: tuple):
         msg = {'command': 'score_response', 'player': self.name, 'score': self.score}
         self.send_message(msg, addr[0], addr[1])
+        logging.debug(f"Sent 'score_response' message to dealer.")
 
     def declare_winner(self):
         winner = min(self.scores, key=self.scores.get)
@@ -622,11 +715,16 @@ class Player:
         for player, score in self.scores.items():
             print(f"{player}: {score}")
         print(f"\nThe winner is {winner}!")
-        end_game_msg = {'command': 'end_game'}
+        end_game_msg = {
+            'command': 'end_game',
+            'scores': self.scores,
+            'winner': winner
+        }
         with self.lock:
             for player in self.players_info:
                 if player.username != self.name:
                     self.send_message(end_game_msg, player.ip, player.p_port)
+                    logging.debug(f"Sent 'end_game' message to {player.username}.")
         msg = {'command': 'end_game', 'game-identifier': self.game_id, 'player': self.name}
         response = self.send_to_tracker(msg)
         if response:
@@ -638,15 +736,15 @@ class Player:
         total = 0
         for col in range(3):
             column_cards = [self.hand_grid[row][col] for row in range(2)]
-            if all(self.card_statuses[row][col] for row in range(2)):
-                if column_cards[0].value[:-1] == column_cards[1].value[:-1]:
-                    continue  # Score for this column is zero
+            # Check for pairs in the same column
+            if column_cards[0].value[:-1] == column_cards[1].value[:-1]:
+                continue  # Score for this column is zero
             for row in range(2):
-                if self.card_statuses[row][col]:
-                    total += self.card_value(self.hand_grid[row][col].value)
+                card_value = self.card_value(self.hand_grid[row][col].value)
+                total += card_value
         self.score = total
 
-    def card_value(self, card_str):
+    def card_value(self, card_str: str) -> int:
         value_str = card_str[:-1]
         if value_str == 'A':
             return 1
@@ -662,50 +760,52 @@ class Player:
             except ValueError:
                 return 0
 
-    def display_final_scores(self):
+    def display_final_scores(self, winner: str = None):
         print("\n=== Final Scores ===")
         for player, score in self.scores.items():
             print(f"{player}: {score}")
         if self.name in self.scores:
             print(f"Your final score: {self.scores[self.name]}")
+        if winner:
+            print(f"\nThe winner is {winner}!")
         print("="*30)
 
     def run(self):
         self.start_listening()
         print("Welcome to the Card Game!")
         self.show_help()
-        while self.running:
-            if not self.in_game:
-                command = input("\nEnter command (type 'help' for options): ").strip().lower()
-                if command == 'register':
-                    self.register()
-                elif command == 'query_players':
-                    self.query_players()
-                elif command == 'query_games':
-                    self.query_games()
-                elif command == 'start_game':
-                    self.start_game()
-                elif command == 'join_game':
-                    self.join_game()
-                elif command == 'de_register':
-                    self.de_register()
-                elif command == 'help':
-                    self.show_help()
-                elif command == 'exit':
-                    if self.name:
+        try:
+            while self.running:
+                if not self.in_game:
+                    command = input("\nEnter command (type 'help' for options): ").strip().lower()
+                    if command == 'register':
+                        self.register()
+                    elif command == 'query_players':
+                        self.query_players()
+                    elif command == 'query_games':
+                        self.query_games()
+                    elif command == 'start_game':
+                        self.start_game()
+                    elif command == 'de_register':
                         self.de_register()
-                    print("Exiting the game. Goodbye!")
-                    self.running = False
-                    break
+                    elif command == 'help':
+                        self.show_help()
+                    elif command == 'exit':
+                        if self.name:
+                            self.de_register()
+                        print("Exiting the game. Goodbye!")
+                        self.running = False
+                        break
+                    else:
+                        print("Invalid command. Type 'help' to see available commands.")
                 else:
-                    print("Invalid command. Type 'help' to see available commands.")
-            else:
-                if self.is_my_turn:
-                    self.play_turn()
                     with self.lock:
-                        self.is_my_turn = False  # Reset the flag after the turn
-                else:
+                        if self.is_my_turn:
+                            self.play_turn()
+                            self.is_my_turn = False  # Reset the flag after the turn
                     time.sleep(0.1)  # Sleep briefly to prevent CPU overuse
+        except KeyboardInterrupt:
+            self.shutdown()
 
     def show_help(self):
         help_text = """
@@ -714,13 +814,21 @@ register         - Register with the tracker
 query_players    - List all registered players
 query_games      - List all active games
 start_game       - Start a new game
-join_game        - Join an existing game
 de_register      - Deregister from the tracker
 help             - Show this help message
 exit             - Exit the application
 =========================
 """
         print(help_text)
+
+    def shutdown(self):
+        logging.info("Shutting down player...")
+        self.running = False
+        self.t_sock.close()
+        self.p_sock.close()
+        if hasattr(self, 'listener_thread') and self.listener_thread.is_alive():
+            self.listener_thread.join()
+        logging.info("Player has been shut down gracefully.")
 
 if __name__ == '__main__':
     if len(sys.argv) != 6:
