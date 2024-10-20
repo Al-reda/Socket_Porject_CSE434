@@ -5,6 +5,7 @@ import json
 import threading
 import sys
 import random
+import math
 import os
 import time
 from common import User, Game  # Ensure 'common.py' defines User and Game classes appropriately
@@ -106,9 +107,19 @@ class Player:
         self.scores_received = set()
 
     def calculate_port_range(self, group_number):
-        base_port = ((group_number - 1) // 2) * 1000 + (1000 if group_number % 2 == 0 else 1500)
-        port_min = base_port
-        port_max = base_port + 499
+# Calculate the port range based on the group number
+        if group_number % 2 == 0:  # Even group number
+            base_port = (group_number // 2) * 1000 + 1000
+            port_min = base_port
+            port_max = base_port + 499
+        else:  # Odd group number
+            base_port = math.ceil(group_number / 2) * 1000 + 500
+            port_min = base_port
+            port_max = base_port + 499
+
+        if not (port_min <= t_port <= port_max) or not (port_min <= p_port <= port_max):
+            print(f"Port numbers must be in the range {port_min}-{port_max} for group {group_number}")
+            sys.exit(1)
         return port_min, port_max
 
     def trace(self, message):

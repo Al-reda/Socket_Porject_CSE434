@@ -1,5 +1,3 @@
-# common.py
-
 class User:
     def __init__(self, username, ip, t_port, p_port, state='free'):
         self.username = username
@@ -18,8 +16,7 @@ class User:
         }
 
     def __repr__(self):
-        return (f"User(username={self.username}, ip={self.ip}, "
-                f"t_port={self.t_port}, p_port={self.p_port}, state={self.state})")
+        return f"User({self.username}, {self.ip}, {self.t_port}, {self.p_port}, {self.state})"
 
 
 class Game:
@@ -38,5 +35,4 @@ class Game:
         }
 
     def __repr__(self):
-        return (f"Game(id={self.id}, dealer={self.dealer.username}, "
-                f"players={[player.username for player in self.players]}, holes={self.holes})")
+        return f"Game({self.id}, {self.dealer.username}, {[p.username for p in self.players]}, {self.holes})"
