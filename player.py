@@ -340,6 +340,9 @@ class Player:
                     row_display += self.format_card("??") + " "
             print(row_display)
         print(f"\n{Colors.YELLOW}Discard Pile Top Card:{Colors.RESET} {self.format_card(self.discard_pile[-1].value) if self.discard_pile else 'Empty'}")
+        # Add Current Player Score display
+        current_score = self.scores.get(self.name, 0)
+        print(f"{Colors.BOLD}{Colors.YELLOW}Current Player Score: {current_score}{Colors.RESET}")
         print("=" * 30)
 
     def format_card(self, card_value):
@@ -585,7 +588,7 @@ class Player:
             for player in self.players_info:
                 if player.username != self.name:
                     self.send_message(end_hole_msg, player.ip, player.p_port)
-            # Display current scores
+            # Display current scores with Current Player Score label
             self.display_current_scores()
             # Display results for 10 seconds before proceeding
             print(f"\nNext hole will start in 10 seconds...")
@@ -679,9 +682,13 @@ class Player:
     def display_current_scores(self):
         print(f"{Colors.BOLD}{Colors.GREEN}\n=== Current Cumulative Scores After Hole {self.current_hole} ==={Colors.RESET}")
         for player, score in self.scores.items():
-            print(f"{player}: {score}")
+            if player == self.name:
+                # Highlight the current player's score
+                print(f"{Colors.BOLD}{Colors.YELLOW}{player}: {score}{Colors.RESET}")
+            else:
+                print(f"{player}: {score}")
         if self.name in self.scores:
-            print(f"Your cumulative score: {self.scores[self.name]}")
+            print(f"{Colors.BOLD}{Colors.YELLOW}\nYour Current Player Score: {self.scores[self.name]}{Colors.RESET}")
         print("=" * 30)
 
     def display_final_scores(self, winner=None):
@@ -689,7 +696,7 @@ class Player:
         for player, score in self.scores.items():
             print(f"{player}: {score}")
         if self.name in self.scores:
-            print(f"Your final score: {self.scores[self.name]}")
+            print(f"{Colors.BOLD}{Colors.YELLOW}\nYour final score: {self.scores[self.name]}{Colors.RESET}")
         if winner:
             print(f"{Colors.BOLD}{Colors.YELLOW}\nThe winner is {winner}!{Colors.RESET}")
         print("=" * 30)
@@ -701,6 +708,9 @@ class Player:
             print(f"{Colors.YELLOW}Discard Pile Top Card:{Colors.RESET} {self.format_card(self.discard_pile[-1].value)}")
         else:
             print("Discard Pile is empty.")
+        # Display Current Player Score
+        current_score = self.scores.get(self.name, 0)
+        print(f"{Colors.BOLD}{Colors.YELLOW}Current Player Score: {current_score}{Colors.RESET}")
         print("\nChoose an action:")
         print(f"{Colors.CYAN}1{Colors.RESET}. Draw from Stock")
         print(f"{Colors.CYAN}2{Colors.RESET}. Draw from Discard")
