@@ -1,3 +1,5 @@
+# player.py
+
 import socket
 import json
 import threading
@@ -5,7 +7,7 @@ import sys
 import random
 import os
 import time
-from common import User
+from common import User, Game  # Ensure 'common.py' defines User and Game classes appropriately
 
 TRACE = False  # Set to True to enable debug tracing
 
@@ -94,9 +96,7 @@ class Player:
         self.hole_over = False
 
         # Calculate the port range based on the group number
-        base_port = ((self.group_number - 1) // 2) * 1000 + (1000 if self.group_number % 2 == 0 else 1500)
-        self.port_min = base_port
-        self.port_max = base_port + 499
+        self.port_min, self.port_max = self.calculate_port_range(group_number)
 
         if not (self.port_min <= self.t_port <= self.port_max) or not (self.port_min <= self.p_port <= self.port_max):
             print(f"Port numbers must be in the range {self.port_min}-{self.port_max} for group {self.group_number}")
@@ -104,6 +104,12 @@ class Player:
 
         # Initialize set to keep track of received scores
         self.scores_received = set()
+
+    def calculate_port_range(self, group_number):
+        base_port = ((group_number - 1) // 2) * 1000 + (1000 if group_number % 2 == 0 else 1500)
+        port_min = base_port
+        port_max = base_port + 499
+        return port_min, port_max
 
     def trace(self, message):
         if TRACE:
@@ -283,7 +289,7 @@ class Player:
             self.score = 0
             self.players_done = set()
             self.game_over = False
-            self.in_game = True  # <-- Important: Set in_game to True
+            self.in_game = True  # Important: Set in_game to True
 
         clear_screen()
         print(f"{Colors.BOLD}{Colors.GREEN}\n=== Assigned to Game {self.game_id} ==={Colors.RESET}")
@@ -417,16 +423,28 @@ class Player:
 
     def handle_steal_card(self, msg, addr):
         from_player = msg.get('from_player')
-        face_up_cards = [(i, j) for i in range(2) for j in range(3) if self.card_statuses[i][j]]
-        if not face_up_cards:
-            response = {'command': 'steal_response', 'card': None}
+        position = msg.get('position')  # Extract desired position from the message
+        if position and isinstance(position, list) and len(position) == 2:
+            i, j = position
+            if 0 <= i < 2 and 0 <= j < 3:
+                with self.lock:
+                    if self.card_statuses[i][j]:
+                        stolen_card = self.hand_grid[i][j]
+                        self.hand_grid[i][j] = Card("??")  # Replace stolen card with face-down card
+                        self.card_statuses[i][j] = False
+                        response = {'command': 'steal_response', 'card': stolen_card.value}
+                        print(f"{from_player} stole your {self.format_card(stolen_card.value)} from position ({i}, {j}).")
+                        self.print_hand()
+                    else:
+                        response = {'command': 'steal_response', 'card': None}
+                        print(f"{from_player} attempted to steal from an empty or face-down position ({i}, {j}).")
+            else:
+                response = {'command': 'steal_response', 'card': None}
+                self.trace("Invalid position received in steal_card.")
         else:
-            i, j = random.choice(face_up_cards)
-            stolen_card = self.hand_grid[i][j]
-            self.card_statuses[i][j] = False
-            response = {'command': 'steal_response', 'card': stolen_card.value}
-            print(f"{from_player} stole your {self.format_card(stolen_card.value)}")
-            self.print_hand()
+            response = {'command': 'steal_response', 'card': None}
+            self.trace("Invalid steal_card message received.")
+
         self.send_message(response, addr[0], addr[1])
 
     def handle_steal_response(self, msg, addr):
@@ -434,7 +452,24 @@ class Player:
             self.steal_response = msg
             self.steal_event.set()
 
+    def handle_swap_card(self, msg, addr):
+        swapped_card_value = msg.get('card')
+        position = msg.get('position')
+        if swapped_card_value and position and isinstance(position, list) and len(position) == 2:
+            i, j = position
+            if 0 <= i < 2 and 0 <= j < 3:
+                with self.lock:
+                    self.hand_grid[i][j] = Card(swapped_card_value)
+                    self.card_statuses[i][j] = True
+                print(f"Received swapped card {self.format_card(swapped_card_value)} at position ({i}, {j}).")
+                self.print_hand()
+            else:
+                self.trace("Invalid position received in swap_card.")
+        else:
+            self.trace("Invalid swap_card message received.")
+
     def handle_send_score(self, msg, addr):
+        self.calculate_score()  # Calculate the current score before sending
         self.send_score(addr)
 
     def handle_score_response(self, msg, addr):
@@ -472,7 +507,7 @@ class Player:
             self.hole_over = False
             while not self.hole_over and self.running:
                 current_player = self.players_info[self.current_player_index]
-                print(f"\nIt's {Colors.CYAN}{current_player.username}'s{Colors.RESET} turn.")
+                print(f"\nIt's {Colors.CYAN}{current_player.username}{Colors.RESET}'s turn.")
                 if current_player.username == self.name:
                     with self.lock:
                         self.is_my_turn = True
@@ -525,7 +560,8 @@ class Player:
 
     def check_hole_end(self):
         with self.lock:
-            return len(self.players_done) >= 1  # Hole ends when any player is done
+            # Hole ends when any player is done (can be modified as per game rules)
+            return len(self.players_done) >= 1
 
     def end_hole(self):
         self.calculate_score()
@@ -551,12 +587,18 @@ class Player:
                     self.send_message(end_hole_msg, player.ip, player.p_port)
             # Display current scores
             self.display_current_scores()
+            # Display results for 10 seconds before proceeding
+            print(f"\nNext hole will start in 10 seconds...")
+            time.sleep(10)
             self.hole_over = True
         else:
             self.send_score((self.dealer_info.ip, self.dealer_info.p_port))
             # Wait for hole_over signal
             while not self.hole_over and self.running:
                 time.sleep(0.1)
+            # Display results for 10 seconds before proceeding
+            print(f"\nNext hole will start in 10 seconds...")
+            time.sleep(10)
         if self.running:
             self.reset_for_next_hole()
 
@@ -617,6 +659,7 @@ class Player:
                 card_value = self.card_value(self.hand_grid[row][col].value)
                 total += card_value
         self.score = total
+        self.trace(f"Calculated score: {self.score}")  # Debug statement
 
     def card_value(self, card_str):
         value_str = card_str[:-1]
@@ -628,14 +671,13 @@ class Player:
             return 10
         elif value_str == 'K':
             return 0
+        elif value_str.isdigit():
+            return int(value_str)
         else:
-            try:
-                return int(value_str)
-            except ValueError:
-                return 0
+            return 0
 
     def display_current_scores(self):
-        print(f"{Colors.BOLD}{Colors.GREEN}\n=== Current Scores After Hole {self.current_hole} ==={Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}\n=== Current Cumulative Scores After Hole {self.current_hole} ==={Colors.RESET}")
         for player, score in self.scores.items():
             print(f"{player}: {score}")
         if self.name in self.scores:
@@ -760,6 +802,7 @@ class Player:
             print("No players available to steal from.")
             self.end_turn()
             return
+
         for idx, player in enumerate(stealable_players):
             print(f"{idx + 1}. {player.username}")
         try:
@@ -773,22 +816,81 @@ class Player:
             print("Invalid input. Turn skipped.")
             self.end_turn()
             return
-        msg = {'command': 'steal_card', 'from_player': self.name}
+
+        # Choose the card position to steal from the target player
+        positions = [(i, j) for i in range(2) for j in range(3)]
+        print("\nChoose a card position to steal from the target player:")
+        for idx, (i, j) in enumerate(positions):
+            print(f"{idx + 1}. Row {i}, Column {j}")
+        try:
+            pos_idx = int(input("Enter the number of the position to steal: ")) - 1
+            if not (0 <= pos_idx < len(positions)):
+                print("Invalid position selected. Turn skipped.")
+                self.end_turn()
+                return
+            steal_position = positions[pos_idx]
+        except ValueError:
+            print("Invalid input. Turn skipped.")
+            self.end_turn()
+            return
+
+        # Send 'steal_card' command to the target player with the desired position
+        msg = {
+            'command': 'steal_card',
+            'from_player': self.name,
+            'position': steal_position  # Include desired position in the message
+        }
         self.send_message(msg, target_player.ip, target_player.p_port)
+
+        # Initialize event for synchronization
         self.steal_event = threading.Event()
-        if self.steal_event.wait(timeout=10):  # Wait for steal response
+        if self.steal_event.wait(timeout=10):
             with self.steal_lock:
                 response = self.steal_response
-            if response.get('card') is None:
-                print(f"{target_player.username} has no face-up cards to steal. Turn skipped.")
+            stolen_card_value = response.get('card')
+            if stolen_card_value is None:
+                print(f"{target_player.username} has no face-up card at the specified position to steal.")
                 self.end_turn()
+                return
             else:
-                stolen_card = Card(response.get('card'))
-                print(f"Stole card {self.format_card(stolen_card.value)} from {target_player.username}")
-                self.handle_drawn_card(stolen_card)
+                stolen_card = Card(stolen_card_value)
+                print(f"Stole {self.format_card(stolen_card.value)} from {target_player.username}.")
+
+                # Now, choose a position in own hand to place the stolen card
+                print("\nChoose a position in your hand to place the stolen card:")
+                for idx, (i, j) in enumerate(positions):
+                    print(f"{idx + 1}. Row {i}, Column {j}")
+                try:
+                    place_idx = int(input("Enter the number of the position: ")) - 1
+                    if not (0 <= place_idx < len(positions)):
+                        print("Invalid position selected. Turn skipped.")
+                        # Optionally, return the stolen card to the target player here
+                        self.end_turn()
+                        return
+                    place_position = positions[place_idx]
+                except ValueError:
+                    print("Invalid input. Turn skipped.")
+                    self.end_turn()
+                    return
+
+                i, j = place_position
+                swapped_card = self.hand_grid[i][j]
+                self.hand_grid[i][j] = stolen_card
+                self.card_statuses[i][j] = True
+                print(f"Swapped {self.format_card(swapped_card.value)} with {self.format_card(stolen_card.value)}.")
+
+                # Send the swapped card back to the target player with the target's original position
+                swap_msg = {
+                    'command': 'swap_card',
+                    'card': swapped_card.value,
+                    'position': steal_position  # Place the swapped card back at the target's original position
+                }
+                self.send_message(swap_msg, target_player.ip, target_player.p_port)
+
+                self.print_hand()
         else:
             print("No response from the target player. Turn skipped.")
-            self.end_turn()
+        self.end_turn()
 
     def end_turn(self):
         if self.is_dealer:
