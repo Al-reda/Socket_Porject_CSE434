@@ -511,7 +511,6 @@ class Player:
         self.is_dealer = False
         self.score = 0
         print(f"{Colors.GREEN}Game has ended gracefully.{Colors.RESET}")
-        print(f"{Colors.BLUE}You can now enter commands. Type 'help' to see available commands.{Colors.RESET}")
 
     def handle_update_player_state(self, msg, addr):
         with self.lock:
@@ -854,7 +853,6 @@ class Player:
         self.is_dealer = False
         self.score = 0
         print(f"{Colors.GREEN}Game has ended gracefully.{Colors.RESET}")
-        print(f"{Colors.BLUE}You can now enter commands. Type 'help' to see available commands.{Colors.RESET}")
 
     def calculate_score(self):
         total = 0
@@ -1185,17 +1183,8 @@ class Player:
         self.show_help()
         while self.running:
             if not self.in_game:
-                # Check if game has started during the input prompt
-                if self.in_game:
-                    continue  # Skip input if the game has started
-                try:
-                    command = input("\nEnter command (type 'help' for options): ").strip().lower()
-                    # Check again if game has started before handling the command
-                    if self.in_game:
-                        continue
-                    self.handle_command(command)
-                except EOFError:
-                    break
+                command = input("\nEnter command (type 'help' for options): ").strip().lower()
+                self.handle_command(command)
             else:
                 time.sleep(0.1)
 
