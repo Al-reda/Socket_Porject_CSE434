@@ -8,6 +8,7 @@ import random
 import math
 import os
 import time
+import traceback
 from common import User, Game  # Ensure 'common.py' defines User and Game classes appropriately
 
 TRACE = False  # Set to True to enable debug tracing
@@ -106,8 +107,13 @@ class Player:
         # Initialize set to keep track of received scores
         self.scores_received = set()
 
+        # New attribute to store other players' hands
+        self.other_players_hands = {}
+
+        # Initialize allow_steal to False by default
+        self.allow_steal = False  # Steal option is now configurable
+
     def calculate_port_range(self, group_number):
-# Calculate the port range based on the group number
         if group_number % 2 == 0:  # Even group number
             base_port = (group_number // 2) * 1000 + 1000
             port_min = base_port
@@ -117,9 +123,6 @@ class Player:
             port_min = base_port
             port_max = base_port + 499
 
-        if not (port_min <= t_port <= port_max) or not (port_min <= p_port <= port_max):
-            print(f"Port numbers must be in the range {port_min}-{port_max} for group {group_number}")
-            sys.exit(1)
         return port_min, port_max
 
     def trace(self, message):
@@ -240,7 +243,13 @@ class Player:
         holes = self.get_numeric_input("Enter number of holes (1-9): ", 1, 9)
         if holes is None:
             return
-        msg = {'command': 'start_game', 'player': self.name, 'n': n, '#holes': holes}
+        # Prompt for including the steal function
+        include_steal = input("Include 'steal' function? (yes/no): ").strip().lower()
+        if include_steal not in ('yes', 'no'):
+            print("Invalid input. Please enter 'yes' or 'no'.")
+            return
+        allow_steal = (include_steal == 'yes')
+        msg = {'command': 'start_game', 'player': self.name, 'n': n, '#holes': holes, 'allow_steal': allow_steal}
         response = self.send_to_tracker(msg)
         if response and response.get('status') == 'SUCCESS':
             print("Game started successfully. Players have been notified.")
@@ -264,12 +273,12 @@ class Player:
             self.listener_thread.start()
 
     def listen_for_player_messages(self):
-        while not self.game_over and self.running:
+        while self.running:
             try:
                 data, addr = self.p_sock.recvfrom(65535)
                 msg = json.loads(data.decode())
                 command = msg.get('command', '')
-                self.trace(f"Received message from {addr}: {msg}")
+                print(f"Received message: {command} from {addr}")
                 handler = getattr(self, f"handle_{command}", None)
                 if handler:
                     handler(msg, addr)
@@ -277,12 +286,14 @@ class Player:
                     print(f"Unknown command received: {command}")
             except Exception as e:
                 self.trace(f"Error in listen_for_player_messages: {e}")
+                traceback.print_exc()
 
     def handle_assigned_game(self, msg, addr):
         game_id = msg.get('game_id')
         dealer_info = msg.get('dealer')
         players = msg.get('players', [])
         holes = msg.get('holes', 0)
+        allow_steal = msg.get('allow_steal', False)  # Extract 'allow_steal' from the message
 
         # Validation
         if game_id is None or dealer_info is None or not players or holes <= 0:
@@ -292,6 +303,7 @@ class Player:
         with self.lock:
             self.game_id = game_id
             self.holes = holes
+            self.allow_steal = allow_steal  # Store the option in the player instance
             self.players_info = [User(**player) for player in players]
             self.dealer_info = User(**dealer_info) if dealer_info else None
             self.is_dealer = (self.name == self.dealer_info.username)
@@ -307,6 +319,11 @@ class Player:
         print(f"Dealer: {Colors.CYAN}{self.dealer_info.username}{Colors.RESET}")
         print(f"Players: {[player.username for player in self.players_info]}")
         print(f"Holes: {self.holes}")
+        # Inform about the steal option
+        if self.allow_steal:
+            print("Steal function is ENABLED in this game.")
+        else:
+            print("Steal function is DISABLED in this game.")
 
         if self.is_dealer:
             # If the player is the dealer, initiate the game setup
@@ -321,49 +338,38 @@ class Player:
         else:
             pass  # Non-dealer players wait for their turns
 
-    def send_hand(self, player, hand):
-        msg = {
-            'command': 'send_hand',
-            'hand': [card.value for card in hand],
-            'dealer_info': self.dealer_info.to_dict()
-        }
-        self.send_message(msg, player.ip, player.p_port)
-
-        # Send acknowledgment mechanism (since UDP is unreliable, this is a simple approach)
-        # Dealer will not proceed until acknowledgment is received
-        # This requires the player to send an acknowledgment upon receiving the hand
-        # However, since UDP does not guarantee delivery, this is a basic implementation
-        # More robust solutions would require retries and sequence numbers
-
     def initialize_hand(self):
         if len(self.hand) != 6:
             print(f"{Colors.RED}Error: Hand does not contain 6 cards. Found {len(self.hand)} cards.{Colors.RESET}")
             return
         self.hand_grid = [self.hand[:3], self.hand[3:]]
-        self.card_statuses = [[False]*3 for _ in range(2)]
-        indices = [(i, j) for i in range(2) for j in range(3)]
-        random_indices = random.sample(indices, 2)
-        for i, j in random_indices:
-            self.card_statuses[i][j] = True
+        # Initialize other players' hands and card statuses are set in handle_send_all_hands
         self.print_hand()
 
     def print_hand(self):
         clear_screen()
-        print(f"{Colors.BOLD}{Colors.GREEN}\n=== {self.name}'s Hand ==={Colors.RESET}")
-        for row in range(2):
-            row_display = ""
-            for col in range(3):
-                card = self.hand_grid[row][col]
-                if self.card_statuses[row][col]:
-                    row_display += self.format_card(card.value) + " "
-                else:
-                    row_display += self.format_card("??") + " "
-            print(row_display)
+        print(f"{Colors.BOLD}{Colors.GREEN}\n=== All Players' Hands ==={Colors.RESET}")
+        self.print_player_hand(self.name, self.hand_grid, self.card_statuses)
+        for username, player_hand in self.other_players_hands.items():
+            print()
+            self.print_player_hand(username, [player_hand['hand'][:3], player_hand['hand'][3:]], player_hand['card_statuses'])
         print(f"\n{Colors.YELLOW}Discard Pile Top Card:{Colors.RESET} {self.format_card(self.discard_pile[-1].value) if self.discard_pile else 'Empty'}")
         # Add Current Player Score display
         current_score = self.scores.get(self.name, 0)
         print(f"{Colors.BOLD}{Colors.YELLOW}Current Player Score: {current_score}{Colors.RESET}")
         print("=" * 30)
+
+    def print_player_hand(self, username, hand_grid, card_statuses):
+        print(f"{Colors.BOLD}{Colors.GREEN}\n=== {username}'s Hand ==={Colors.RESET}")
+        for row in range(2):
+            row_display = ""
+            for col in range(3):
+                card = hand_grid[row][col]
+                if card_statuses[row][col]:
+                    row_display += self.format_card(card.value) + " "
+                else:
+                    row_display += self.format_card("??") + " "
+            print(row_display)
 
     def format_card(self, card_value):
         suit_symbols = {'S': '♠', 'H': '♥', 'D': '♦', 'C': '♣'}
@@ -376,30 +382,16 @@ class Player:
         return f"{color}[{value}{suit_symbol}]{Colors.RESET}"
 
     def print_full_hand(self):
-        """Print the hand with all cards revealed."""
+        """Print all players' hands with all cards revealed."""
         clear_screen()
-        print(f"{Colors.BOLD}{Colors.GREEN}\n=== {self.name}'s Full Hand ==={Colors.RESET}")
-        
-        # Debugging: Check the structure of hand_grid
-        if not self.hand_grid:
-            print(f"{Colors.RED}Error: hand_grid is empty.{Colors.RESET}")
-            return
-        if len(self.hand_grid) != 2:
-            print(f"{Colors.RED}Error: hand_grid should have 2 rows, found {len(self.hand_grid)}.{Colors.RESET}")
-            return
-        for idx, row in enumerate(self.hand_grid):
-            if len(row) != 3:
-                print(f"{Colors.RED}Error: Row {idx} in hand_grid should have 3 cards, found {len(row)}.{Colors.RESET}")
-                return
-        
-        # Proceed to print the hand
-        for row in range(2):
-            row_display = ""
-            for col in range(3):
-                card = self.hand_grid[row][col]
-                row_display += self.format_card(card.value) + " "
-            print(row_display)
-        
+        print(f"{Colors.BOLD}{Colors.GREEN}\n=== All Players' Full Hands ==={Colors.RESET}")
+        # Reveal own hand
+        self.print_full_player_hand(self.name, self.hand_grid)
+        # Reveal other players' hands
+        for username, player_hand in self.other_players_hands.items():
+            print()
+            hand_grid = [player_hand['hand'][:3], player_hand['hand'][3:]]
+            self.print_full_player_hand(username, hand_grid)
         # Display cumulative scores
         if self.scores:
             print(f"\n{Colors.BOLD}{Colors.YELLOW}Final Cumulative Scores:{Colors.RESET}")
@@ -407,21 +399,41 @@ class Player:
                 print(f"{player}: {score}")
         print("=" * 30)
 
-    def handle_send_hand(self, msg, addr):
-        received_hand = msg.get('hand', [])
+    def print_full_player_hand(self, username, hand_grid):
+        print(f"{Colors.BOLD}{Colors.GREEN}\n=== {username}'s Full Hand ==={Colors.RESET}")
+        for row in range(2):
+            row_display = ""
+            for col in range(3):
+                card = hand_grid[row][col]
+                row_display += self.format_card(card.value) + " "
+            print(row_display)
+
+    def handle_send_all_hands(self, msg, addr):
+        received_hands = msg.get('hands', {})
+        received_statuses = msg.get('card_statuses', {})
         dealer_info = msg.get('dealer_info')
-        if isinstance(received_hand, list) and len(received_hand) == 6:
-            self.hand = [Card(val) for val in received_hand]
-            self.initialize_hand()
+        if isinstance(received_hands, dict) and len(received_hands) == len(self.players_info):
+            # Initialize hands and card statuses for all players
+            self.hand = [Card(val) for val in received_hands[self.name]]
+            self.card_statuses = received_statuses[self.name]
+            self.hand_grid = [self.hand[:3], self.hand[3:]]
+            # Store other players' hands and card statuses
+            for username, hand_values in received_hands.items():
+                if username != self.name:
+                    self.other_players_hands[username] = {
+                        'hand': [Card(val) for val in hand_values],
+                        'card_statuses': received_statuses[username]
+                    }
+            self.print_hand()
             self.trace(f"Hand initialized: {self.hand_grid}")
             # Send acknowledgment
-            ack_msg = {"status": "SUCCESS", "message": "Hand received and initialized"}
+            ack_msg = {"status": "SUCCESS", "message": "Hands received and initialized"}
             self.send_message(ack_msg, addr[0], addr[1])
         else:
-            self.trace("Invalid hand data received.")
-            print(f"{Colors.RED}Error: Received invalid hand data.{Colors.RESET}")
+            self.trace("Invalid hands data received.")
+            print(f"{Colors.RED}Error: Received invalid hands data.{Colors.RESET}")
             # Send failure acknowledgment
-            ack_msg = {"status": "FAILURE", "message": "Invalid hand data"}
+            ack_msg = {"status": "FAILURE", "message": "Invalid hands data"}
             self.send_message(ack_msg, addr[0], addr[1])
         if dealer_info:
             self.dealer_info = User(**dealer_info)
@@ -444,16 +456,31 @@ class Player:
             self.discard_pile = [Card(val) for val in msg.get('discard_pile', [])]
         self.print_hand()
 
+    def handle_update_hand(self, msg, addr):
+        player = msg.get('player')
+        hand_values = msg.get('hand')
+        card_statuses = msg.get('card_statuses')
+        if player and hand_values and card_statuses:
+            hand = [Card(val) for val in hand_values]
+            hand_grid = [hand[:3], hand[3:]]
+            if player != self.name:
+                self.other_players_hands[player]['hand'] = hand
+                self.other_players_hands[player]['card_statuses'] = card_statuses
+            else:
+                self.hand_grid = hand_grid
+                self.card_statuses = card_statuses
+            self.print_hand()
+
     def handle_end_game(self, msg, addr):
         self.game_over = True
         self.in_game = False
         print("\nGame ended!")
-        
+
         if self.hand_grid:
             self.print_full_hand()  # Reveal all cards
         else:
             print(f"{Colors.RED}Cannot reveal hand because it is empty.{Colors.RESET}")
-        
+
         # Receive the final scores
         if 'scores' in msg:
             self.scores = msg['scores']
@@ -463,14 +490,28 @@ class Player:
                 self.print_full_hand()  # Ensure all cards are revealed at game end
         else:
             print("Failed to receive final scores.")
-        
-        # Set flags to terminate the game loop
+
+        # Reset game state variables
         self.game_over = True
         self.in_game = False
-        self.running = False  # Add this line to stop the main loop
-        print(f"{Colors.GREEN}Game has ended gracefully. Exiting...{Colors.RESET}")
-        sys.exit(0)  # Optionally, forcefully exit the program
-
+        self.game_id = None
+        self.players_info = []
+        self.scores = {}
+        self.hand = []
+        self.hand_grid = []
+        self.card_statuses = []
+        self.stock_pile = []
+        self.discard_pile = []
+        self.is_my_turn = False
+        self.turn_data = {}
+        self.players_done = set()
+        self.hole_over = False
+        self.current_hole = 0
+        self.dealer_info = None
+        self.is_dealer = False
+        self.score = 0
+        print(f"{Colors.GREEN}Game has ended gracefully.{Colors.RESET}")
+        print(f"{Colors.BLUE}You can now enter commands. Type 'help' to see available commands.{Colors.RESET}")
 
     def handle_update_player_state(self, msg, addr):
         with self.lock:
@@ -488,54 +529,61 @@ class Player:
             self.trace(f"Received turn_over from {addr}, but not the dealer.")
 
     def handle_steal_card(self, msg, addr):
-        from_player = msg.get('from_player')
-        position = msg.get('position')  # Extract desired position from the message
-        if position and isinstance(position, list) and len(position) == 2:
-            i, j = position
-            if 0 <= i < 2 and 0 <= j < 3:
-                with self.lock:
-                    if self.card_statuses[i][j]:
-                        stolen_card = self.hand_grid[i][j]
-                        self.hand_grid[i][j] = Card("??")  # Replace stolen card with face-down card
-                        self.card_statuses[i][j] = False
-                        response = {'command': 'steal_response', 'card': stolen_card.value}
-                        print(f"{from_player} stole your {self.format_card(stolen_card.value)} from position ({i}, {j}).")
-                        self.print_hand()
-                    else:
-                        response = {'command': 'steal_response', 'card': None}
-                        print(f"{from_player} attempted to steal from an empty or face-down position ({i}, {j}).")
-            else:
-                response = {'command': 'steal_response', 'card': None}
-                self.trace("Invalid position received in steal_card.")
-        else:
-            response = {'command': 'steal_response', 'card': None}
-            self.trace("Invalid steal_card message received.")
+        if not self.allow_steal:
+            print("Received 'steal_card' message, but stealing is not allowed in this game.")
+            # Optionally, send a response indicating stealing is not allowed
+            response = {'command': 'steal_response', 'stolen_card_value': None}
+            self.send_message(response, addr[0], addr[1])
+            return
+        try:
+            print(f"handle_steal_card called by {msg.get('from_player')} at {addr}")
+            from_player = msg.get('from_player')
+            steal_position = msg.get('steal_position')  # The position in this player's hand to steal from
+            exchange_card_value = msg.get('exchange_card_value')
+            exchange_position = msg.get('exchange_position')  # The position in the stealing player's hand where the exchange card came from
 
-        self.send_message(response, addr[0], addr[1])
+            if steal_position and isinstance(steal_position, list) and len(steal_position) == 2:
+                i, j = steal_position
+                if 0 <= i < 2 and 0 <= j < 3:
+                    with self.lock:
+                        if self.card_statuses[i][j]:
+                            # The card at this position is face-up and can be stolen
+                            stolen_card = self.hand_grid[i][j]
+                            # Replace stolen card with the exchange card, placed face-down
+                            self.hand_grid[i][j] = Card(exchange_card_value)
+                            self.card_statuses[i][j] = False  # Card is face-down
+                            response = {
+                                'command': 'steal_response',
+                                'stolen_card_value': stolen_card.value,
+                                'exchange_position': exchange_position
+                            }
+                            print(f"{from_player} stole your {self.format_card(stolen_card.value)} from position ({i}, {j}).")
+                            # Send hand update to other players
+                            self.send_hand_update()
+                            self.print_hand()
+                        else:
+                            response = {'command': 'steal_response', 'stolen_card_value': None}
+                            print(f"{from_player} attempted to steal from a face-down position ({i}, {j}).")
+                    # Send response back to the stealing player
+                    self.send_message(response, addr[0], addr[1])
+                else:
+                    response = {'command': 'steal_response', 'stolen_card_value': None}
+                    print("Invalid position received in steal_card.")
+                    self.send_message(response, addr[0], addr[1])
+            else:
+                response = {'command': 'steal_response', 'stolen_card_value': None}
+                print("Invalid steal_card message received.")
+                self.send_message(response, addr[0], addr[1])
+        except Exception as e:
+            print(f"Error in handle_steal_card: {e}")
+            traceback.print_exc()
+            response = {'command': 'steal_response', 'stolen_card_value': None}
+            self.send_message(response, addr[0], addr[1])
 
     def handle_steal_response(self, msg, addr):
         with self.steal_lock:
             self.steal_response = msg
             self.steal_event.set()
-
-    def handle_swap_card(self, msg, addr):
-        swapped_card_value = msg.get('card')
-        position = msg.get('position')
-        if swapped_card_value and position and isinstance(position, list) and len(position) == 2:
-            i, j = position
-            if 0 <= i < 2 and 0 <= j < 3:
-                with self.lock:
-                    if i < len(self.hand_grid) and j < len(self.hand_grid[i]):
-                        self.hand_grid[i][j] = Card(swapped_card_value)
-                        self.card_statuses[i][j] = True
-                        print(f"Received swapped card {self.format_card(swapped_card_value)} at position ({i}, {j}).")
-                    else:
-                        print(f"{Colors.RED}Error: Invalid position ({i}, {j}) for swap.{Colors.RESET}")
-                self.print_hand()
-            else:
-                self.trace("Invalid position received in swap_card.")
-        else:
-            self.trace("Invalid swap_card message received.")
 
     def handle_send_score(self, msg, addr):
         self.calculate_score()  # Calculate the current score before sending
@@ -618,18 +666,41 @@ class Player:
     def setup_hole(self):
         # Dealer sets up the game for the hole
         deck = Deck()
+        deck.shuffle()
         self.stock_pile = deck.cards.copy()
         hands = {}
+        card_statuses = {}
         for player in self.players_info:
             hand = [self.stock_pile.pop() for _ in range(6)]
             hands[player.username] = hand
-        # Send hands and dealer info to all players
+            # Generate initial card statuses for this player's hand
+            statuses = [[False]*3 for _ in range(2)]
+            indices = [(i, j) for i in range(2) for j in range(3)]
+            random_indices = random.sample(indices, 2)
+            for i, j in random_indices:
+                statuses[i][j] = True
+            card_statuses[player.username] = statuses
+        # Send all hands, card statuses, and dealer info to all players
         for player in self.players_info:
-            if player.username != self.name:
-                self.send_hand(player, hands[player.username])
-            else:
-                self.hand = hands[player.username]
-                self.initialize_hand()
+            msg = {
+                'command': 'send_all_hands',
+                'hands': {username: [card.value for card in hand] for username, hand in hands.items()},
+                'card_statuses': card_statuses,
+                'dealer_info': self.dealer_info.to_dict()
+            }
+            self.send_message(msg, player.ip, player.p_port)
+        # Initialize dealer's own hand and card statuses
+        self.hand = hands[self.name]
+        self.card_statuses = card_statuses[self.name]
+        self.hand_grid = [self.hand[:3], self.hand[3:]]
+        # Initialize other players' hands and card statuses
+        for username in hands.keys():
+            if username != self.name:
+                self.other_players_hands[username] = {
+                    'hand': hands[username],
+                    'card_statuses': card_statuses[username]
+                }
+        self.print_hand()
         if not self.stock_pile:
             self.trace("Stock pile is empty after dealing.")
         top_card = self.stock_pile.pop()
@@ -726,6 +797,7 @@ class Player:
         self.players_done = set()
         self.game_over = False
         self.hole_over = False
+        self.other_players_hands = {}
         if self.current_hole < self.holes:
             if self.is_dealer:
                 self.setup_hole()
@@ -753,8 +825,8 @@ class Player:
             for player in self.players_info:
                 if player.username != self.name:
                     self.send_message(end_game_msg, player.ip, player.p_port)
-        # Send end_game to tracker
-        msg = {'command': 'end_game', 'game-identifier': self.game_id, 'player': self.name}
+        # Send end to tracker
+        msg = {'command': 'end', 'game-identifier': self.game_id, 'player': self.name}
         response = self.send_to_tracker(msg)
         if response:
             print(response.get('message', ''))
@@ -762,13 +834,27 @@ class Player:
             self.print_full_hand()  # Reveal all cards at game end
         else:
             print(f"{Colors.RED}Cannot reveal hand because it is empty.{Colors.RESET}")
-        # Set flags to terminate the game loop
+        # Reset game state variables
         self.game_over = True
         self.in_game = False
-        self.running = False  # Add this line to stop the main loop
-        print(f"{Colors.GREEN}Game has ended gracefully. Exiting...{Colors.RESET}")
-        sys.exit(0)  # Optionally, forcefully exit the program
-
+        self.game_id = None
+        self.players_info = []
+        self.scores = {}
+        self.hand = []
+        self.hand_grid = []
+        self.card_statuses = []
+        self.stock_pile = []
+        self.discard_pile = []
+        self.is_my_turn = False
+        self.turn_data = {}
+        self.players_done = set()
+        self.hole_over = False
+        self.current_hole = 0
+        self.dealer_info = None
+        self.is_dealer = False
+        self.score = 0
+        print(f"{Colors.GREEN}Game has ended gracefully.{Colors.RESET}")
+        print(f"{Colors.BLUE}You can now enter commands. Type 'help' to see available commands.{Colors.RESET}")
 
     def calculate_score(self):
         total = 0
@@ -833,18 +919,19 @@ class Player:
         print("\nChoose an action:")
         print(f"{Colors.CYAN}1{Colors.RESET}. Draw from Stock")
         print(f"{Colors.CYAN}2{Colors.RESET}. Draw from Discard")
-        print(f"{Colors.CYAN}3{Colors.RESET}. Steal a Card")
+        if self.allow_steal:
+            print(f"{Colors.CYAN}3{Colors.RESET}. Steal a Card")
         while True:
-            choice = input("Enter your choice (1-3): ").strip()
-            if choice in ['1', '2', '3']:
+            choice = input("Enter your choice (1-2" + ("-3" if self.allow_steal else "") + "): ").strip()
+            if choice in ['1', '2'] or (self.allow_steal and choice == '3'):
                 break
             else:
-                print("Invalid choice. Please enter 1, 2, or 3.")
+                print("Invalid choice. Please enter a valid option.")
         if choice == '1':
             self.draw_from_stock()
         elif choice == '2':
             self.draw_from_discard()
-        elif choice == '3':
+        elif choice == '3' and self.allow_steal:
             self.steal_card()
 
     def draw_from_stock(self):
@@ -893,6 +980,8 @@ class Player:
                     with self.lock:
                         self.discard_pile.append(discarded_card)
                     print(f"Swapped {self.format_card(discarded_card.value)} with {self.format_card(drawn_card.value)}")
+                    # Send update to other players
+                    self.send_hand_update()
                     break
                 except ValueError:
                     print("Invalid input.")
@@ -924,6 +1013,10 @@ class Player:
             self.send_message(msg, self.dealer_info.ip, self.dealer_info.p_port)
 
     def steal_card(self):
+        if not self.allow_steal:
+            print("Stealing is not allowed in this game.")
+            self.end_turn()
+            return
         print("\nPlayers you can steal from:")
         with self.lock:
             stealable_players = [p for p in self.players_info if p.username != self.name]
@@ -946,37 +1039,71 @@ class Player:
             self.end_turn()
             return
 
-        # Choose the card position to steal from the target player
-        positions = [(i, j) for i in range(2) for j in range(3)]
-        print("\nChoose a card position to steal from the target player:")
-        for idx, (i, j) in enumerate(positions):
+        # Choose the face-up card positions from the target player
+        target_hand_statuses = self.other_players_hands[target_player.username]['card_statuses']
+        face_up_positions = [(i, j) for i in range(2) for j in range(3) if target_hand_statuses[i][j]]
+        if not face_up_positions:
+            print(f"{target_player.username} has no face-up cards to steal.")
+            self.end_turn()
+            return
+
+        print("\nChoose a face-up card position to steal from the target player:")
+        for idx, (i, j) in enumerate(face_up_positions):
             print(f"{idx + 1}. Row {i}, Column {j}")
         try:
             pos_idx = int(input("Enter the number of the position to steal: ")) - 1
-            if not (0 <= pos_idx < len(positions)):
+            if not (0 <= pos_idx < len(face_up_positions)):
                 print("Invalid position selected. Turn skipped.")
                 self.end_turn()
                 return
-            steal_position = positions[pos_idx]
+            steal_position = face_up_positions[pos_idx]
         except ValueError:
             print("Invalid input. Turn skipped.")
             self.end_turn()
             return
 
-        # Send 'steal_card' command to the target player with the desired position
+        # Now, choose a face-down card from your own hand to give in exchange
+        face_down_positions = [(i, j) for i in range(2) for j in range(3) if not self.card_statuses[i][j]]
+        if not face_down_positions:
+            print("You have no face-down cards to exchange. Cannot perform steal action.")
+            self.end_turn()
+            return
+
+        print("\nChoose a face-down card from your hand to give in exchange:")
+        for idx, (i, j) in enumerate(face_down_positions):
+            print(f"{idx + 1}. Row {i}, Column {j}")
+        try:
+            exchange_idx = int(input("Enter the number of the card to exchange: ")) - 1
+            if not (0 <= exchange_idx < len(face_down_positions)):
+                print("Invalid position selected. Turn skipped.")
+                self.end_turn()
+                return
+            exchange_position = face_down_positions[exchange_idx]
+        except ValueError:
+            print("Invalid input. Turn skipped.")
+            self.end_turn()
+            return
+
+        # Get the exchange card value
+        i, j = exchange_position
+        exchange_card = self.hand_grid[i][j]
+
+        # Send 'steal_card' command to the target player with the desired position and exchange card value
         msg = {
             'command': 'steal_card',
             'from_player': self.name,
-            'position': steal_position  # Include desired position in the message
+            'steal_position': steal_position,  # Include desired position in the message
+            'exchange_card_value': exchange_card.value,
+            'exchange_position': exchange_position  # The position in the stealing player's own hand
         }
         self.send_message(msg, target_player.ip, target_player.p_port)
 
         # Initialize event for synchronization
         self.steal_event = threading.Event()
-        if self.steal_event.wait(timeout=10):
+        if self.steal_event.wait(timeout=20):  # Increased timeout to 20 seconds
             with self.steal_lock:
                 response = self.steal_response
-            stolen_card_value = response.get('card')
+            stolen_card_value = response.get('stolen_card_value')
             if stolen_card_value is None:
                 print(f"{target_player.username} has no face-up card at the specified position to steal.")
                 self.end_turn()
@@ -985,47 +1112,30 @@ class Player:
                 stolen_card = Card(stolen_card_value)
                 print(f"Stole {self.format_card(stolen_card.value)} from {target_player.username}.")
 
-                # Now, choose a position in own hand to place the stolen card
-                print("\nChoose a position in your hand to place the stolen card:")
-                for idx, (i, j) in enumerate(positions):
-                    print(f"{idx + 1}. Row {i}, Column {j}")
-                try:
-                    place_idx = int(input("Enter the number of the position: ")) - 1
-                    if not (0 <= place_idx < len(positions)):
-                        print("Invalid position selected. Turn skipped.")
-                        # Optionally, return the stolen card to the target player here
-                        self.end_turn()
-                        return
-                    place_position = positions[place_idx]
-                except ValueError:
-                    print("Invalid input. Turn skipped.")
-                    self.end_turn()
-                    return
+                # Place the stolen card face-up at the exchange_position in own hand
+                i, j = exchange_position
+                self.hand_grid[i][j] = stolen_card
+                self.card_statuses[i][j] = True  # Card is now face-up
 
-                i, j = place_position
-                with self.lock:
-                    if i < len(self.hand_grid) and j < len(self.hand_grid[i]):
-                        swapped_card = self.hand_grid[i][j]
-                        self.hand_grid[i][j] = stolen_card
-                        self.card_statuses[i][j] = True
-                        print(f"Swapped {self.format_card(swapped_card.value)} with {self.format_card(stolen_card.value)}.")
-                    else:
-                        print(f"{Colors.RED}Error: Invalid position ({i}, {j}) for swapping.{Colors.RESET}")
-                        self.end_turn()
-                        return
-
-                # Send the swapped card back to the target player with the target's original position
-                swap_msg = {
-                    'command': 'swap_card',
-                    'card': swapped_card.value,
-                    'position': steal_position  # Place the swapped card back at the target's original position
-                }
-                self.send_message(swap_msg, target_player.ip, target_player.p_port)
+                # Send hand update to other players
+                self.send_hand_update()
 
                 self.print_hand()
         else:
             print("No response from the target player. Turn skipped.")
         self.end_turn()
+
+    def send_hand_update(self):
+        msg = {
+            'command': 'update_hand',
+            'player': self.name,
+            'hand': [card.value for row in self.hand_grid for card in row],
+            'card_statuses': self.card_statuses
+        }
+        with self.lock:
+            for player in self.players_info:
+                if player.username != self.name:
+                    self.send_message(msg, player.ip, player.p_port)
 
     def end_turn(self):
         if self.is_dealer:
@@ -1073,9 +1183,21 @@ class Player:
     def input_thread(self):
         print(f"{Colors.BOLD}{Colors.GREEN}Welcome to the Card Game!{Colors.RESET}")
         self.show_help()
-        while self.running and not self.in_game:
-            command = input("\nEnter command (type 'help' for options): ").strip().lower()
-            self.handle_command(command)
+        while self.running:
+            if not self.in_game:
+                # Check if game has started during the input prompt
+                if self.in_game:
+                    continue  # Skip input if the game has started
+                try:
+                    command = input("\nEnter command (type 'help' for options): ").strip().lower()
+                    # Check again if game has started before handling the command
+                    if self.in_game:
+                        continue
+                    self.handle_command(command)
+                except EOFError:
+                    break
+            else:
+                time.sleep(0.1)
 
     def handle_command(self, command):
         if command == 'register':

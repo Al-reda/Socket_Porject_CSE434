@@ -45,12 +45,12 @@ class Tracker:
         return self.query_players()
 
     def cmd_start_game(self, msg):
-        return self.start_game(msg['player'], msg['n'], msg['#holes'])
+        return self.start_game(msg['player'], msg['n'], msg['#holes'], msg.get('allow_steal', False))
 
     def cmd_query_games(self, msg):
         return self.query_games()
 
-    def cmd_end_game(self, msg):
+    def cmd_end(self, msg):
         return self.end_game(msg['game-identifier'], msg['player'])
 
     def cmd_de_register(self, msg):
@@ -73,7 +73,7 @@ class Tracker:
                 "players": [player.to_dict() for player in self.players]
             }
 
-    def start_game(self, dealer_name, n, holes):
+    def start_game(self, dealer_name, n, holes, allow_steal=False):
         with self.lock:
             dealer = next((p for p in self.players if p.username == dealer_name and p.state == "free"), None)
             if not dealer:
@@ -102,7 +102,8 @@ class Tracker:
                 "game_id": game.id,
                 "dealer": dealer.to_dict(),
                 "players": [player.to_dict() for player in players],
-                "holes": holes
+                "holes": holes,
+                "allow_steal": allow_steal  # Include the steal option in the message
             }
             for player in players:
                 self.send_message_to_player(assigned_game_msg, player)

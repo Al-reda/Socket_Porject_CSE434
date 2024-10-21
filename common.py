@@ -1,3 +1,5 @@
+# common.py
+
 class User:
     def __init__(self, username, ip, t_port, p_port, state='free'):
         self.username = username
@@ -17,7 +19,6 @@ class User:
 
     def __repr__(self):
         return f"User({self.username}, {self.ip}, {self.t_port}, {self.p_port}, {self.state})"
-
 
 class Game:
     def __init__(self, dealer, players, game_id, holes):
