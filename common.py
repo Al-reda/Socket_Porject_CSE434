@@ -21,19 +21,21 @@ class User:
         return f"User({self.username}, {self.ip}, {self.t_port}, {self.p_port}, {self.state})"
 
 class Game:
-    def __init__(self, dealer, players, game_id, holes):
+    def __init__(self, dealer, players, game_id, holes, allow_steal=False):
         self.dealer = dealer  # Instance of User
         self.players = players  # List of User instances
         self.id = game_id
         self.holes = holes
+        self.allow_steal = allow_steal  # New attribute
 
     def to_dict(self):
         return {
             'id': self.id,
             'dealer': self.dealer.to_dict(),
             'players': [player.to_dict() for player in self.players],
-            'holes': self.holes
+            'holes': self.holes,
+            'allow_steal': self.allow_steal  # Include in dict
         }
 
     def __repr__(self):
-        return f"Game({self.id}, {self.dealer.username}, {[p.username for p in self.players]}, {self.holes})"
+        return f"Game({self.id}, {self.dealer.username}, {[p.username for p in self.players]}, {self.holes}, Allow Steal: {self.allow_steal})"

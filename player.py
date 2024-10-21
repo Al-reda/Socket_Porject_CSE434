@@ -79,6 +79,8 @@ class Player:
         self.lock = threading.Lock()
         self.dealer_info = None
         self.scores = {}
+        self.hole_scores = {}      # Store scores for the current hole
+        self.hole_winner = None    # Store winner of the current hole
         self.running = True
         self.players_done = set()
         self.in_game = False
@@ -86,9 +88,6 @@ class Player:
         # Flags and data for thread communication
         self.is_my_turn = False
         self.turn_data = {}
-        self.steal_event = threading.Event()
-        self.steal_response = {}
-        self.steal_lock = threading.Lock()
 
         # Initialize turn_event for synchronization
         self.turn_event = threading.Event()
@@ -110,8 +109,8 @@ class Player:
         # New attribute to store other players' hands
         self.other_players_hands = {}
 
-        # Initialize allow_steal to False by default
-        self.allow_steal = False  # Steal option is now configurable
+        # New attribute to indicate if stealing is allowed
+        self.allow_steal = False
 
     def calculate_port_range(self, group_number):
         if group_number % 2 == 0:  # Even group number
@@ -243,13 +242,22 @@ class Player:
         holes = self.get_numeric_input("Enter number of holes (1-9): ", 1, 9)
         if holes is None:
             return
-        # Prompt for including the steal function
-        include_steal = input("Include 'steal' function? (yes/no): ").strip().lower()
-        if include_steal not in ('yes', 'no'):
+        allow_steal_input = input("Do you want to allow stealing in this game? (yes/no): ").strip().lower()
+        if allow_steal_input == 'yes':
+            allow_steal = True
+        elif allow_steal_input == 'no':
+            allow_steal = False
+        else:
             print("Invalid input. Please enter 'yes' or 'no'.")
             return
-        allow_steal = (include_steal == 'yes')
-        msg = {'command': 'start_game', 'player': self.name, 'n': n, '#holes': holes, 'allow_steal': allow_steal}
+
+        msg = {
+            'command': 'start_game',
+            'player': self.name,
+            'n': n,
+            '#holes': holes,
+            'allow_steal': allow_steal
+        }
         response = self.send_to_tracker(msg)
         if response and response.get('status') == 'SUCCESS':
             print("Game started successfully. Players have been notified.")
@@ -293,7 +301,7 @@ class Player:
         dealer_info = msg.get('dealer')
         players = msg.get('players', [])
         holes = msg.get('holes', 0)
-        allow_steal = msg.get('allow_steal', False)  # Extract 'allow_steal' from the message
+        self.allow_steal = msg.get('allow_steal', False)  # Get allow_steal flag
 
         # Validation
         if game_id is None or dealer_info is None or not players or holes <= 0:
@@ -303,7 +311,7 @@ class Player:
         with self.lock:
             self.game_id = game_id
             self.holes = holes
-            self.allow_steal = allow_steal  # Store the option in the player instance
+
             self.players_info = [User(**player) for player in players]
             self.dealer_info = User(**dealer_info) if dealer_info else None
             self.is_dealer = (self.name == self.dealer_info.username)
@@ -319,11 +327,7 @@ class Player:
         print(f"Dealer: {Colors.CYAN}{self.dealer_info.username}{Colors.RESET}")
         print(f"Players: {[player.username for player in self.players_info]}")
         print(f"Holes: {self.holes}")
-        # Inform about the steal option
-        if self.allow_steal:
-            print("Steal function is ENABLED in this game.")
-        else:
-            print("Steal function is DISABLED in this game.")
+        print(f"Stealing Allowed: {'Yes' if self.allow_steal else 'No'}")  # Display if stealing is allowed
 
         if self.is_dealer:
             # If the player is the dealer, initiate the game setup
@@ -497,6 +501,8 @@ class Player:
         self.game_id = None
         self.players_info = []
         self.scores = {}
+        self.hole_scores = {}
+        self.hole_winner = None
         self.hand = []
         self.hand_grid = []
         self.card_statuses = []
@@ -527,63 +533,6 @@ class Player:
         else:
             self.trace(f"Received turn_over from {addr}, but not the dealer.")
 
-    def handle_steal_card(self, msg, addr):
-        if not self.allow_steal:
-            print("Received 'steal_card' message, but stealing is not allowed in this game.")
-            # Optionally, send a response indicating stealing is not allowed
-            response = {'command': 'steal_response', 'stolen_card_value': None}
-            self.send_message(response, addr[0], addr[1])
-            return
-        try:
-            print(f"handle_steal_card called by {msg.get('from_player')} at {addr}")
-            from_player = msg.get('from_player')
-            steal_position = msg.get('steal_position')  # The position in this player's hand to steal from
-            exchange_card_value = msg.get('exchange_card_value')
-            exchange_position = msg.get('exchange_position')  # The position in the stealing player's hand where the exchange card came from
-
-            if steal_position and isinstance(steal_position, list) and len(steal_position) == 2:
-                i, j = steal_position
-                if 0 <= i < 2 and 0 <= j < 3:
-                    with self.lock:
-                        if self.card_statuses[i][j]:
-                            # The card at this position is face-up and can be stolen
-                            stolen_card = self.hand_grid[i][j]
-                            # Replace stolen card with the exchange card, placed face-down
-                            self.hand_grid[i][j] = Card(exchange_card_value)
-                            self.card_statuses[i][j] = False  # Card is face-down
-                            response = {
-                                'command': 'steal_response',
-                                'stolen_card_value': stolen_card.value,
-                                'exchange_position': exchange_position
-                            }
-                            print(f"{from_player} stole your {self.format_card(stolen_card.value)} from position ({i}, {j}).")
-                            # Send hand update to other players
-                            self.send_hand_update()
-                            self.print_hand()
-                        else:
-                            response = {'command': 'steal_response', 'stolen_card_value': None}
-                            print(f"{from_player} attempted to steal from a face-down position ({i}, {j}).")
-                    # Send response back to the stealing player
-                    self.send_message(response, addr[0], addr[1])
-                else:
-                    response = {'command': 'steal_response', 'stolen_card_value': None}
-                    print("Invalid position received in steal_card.")
-                    self.send_message(response, addr[0], addr[1])
-            else:
-                response = {'command': 'steal_response', 'stolen_card_value': None}
-                print("Invalid steal_card message received.")
-                self.send_message(response, addr[0], addr[1])
-        except Exception as e:
-            print(f"Error in handle_steal_card: {e}")
-            traceback.print_exc()
-            response = {'command': 'steal_response', 'stolen_card_value': None}
-            self.send_message(response, addr[0], addr[1])
-
-    def handle_steal_response(self, msg, addr):
-        with self.steal_lock:
-            self.steal_response = msg
-            self.steal_event.set()
-
     def handle_send_score(self, msg, addr):
         self.calculate_score()  # Calculate the current score before sending
         self.send_score(addr)
@@ -592,10 +541,7 @@ class Player:
         player_name = msg.get('player')
         player_score = msg.get('score', 0)
         with self.lock:
-            if player_name in self.scores:
-                self.scores[player_name] += player_score
-            else:
-                self.scores[player_name] = player_score
+            self.hole_scores[player_name] = player_score  # Store hole score
             if self.is_dealer:
                 self.scores_received.add(player_name)
                 self.trace(f"Received score from {player_name}: {player_score}")
@@ -611,12 +557,41 @@ class Player:
     def handle_end_hole(self, msg, addr):
         # Handle end of hole message from the dealer
         self.scores = msg.get('scores', self.scores)
+        self.hole_scores = msg.get('hole_scores', {})
+        self.hole_winner = msg.get('hole_winner', None)
         self.display_current_scores()
         if self.hand_grid:
             self.print_full_hand()  # Reveal all cards
         else:
             print(f"{Colors.RED}Cannot reveal hand because it is empty.{Colors.RESET}")
         self.hole_over = True
+
+    def handle_steal_request(self, msg, addr):
+        from_player_name = msg.get('from_player')
+        steal_position = msg.get('steal_position')  # (i, j)
+        exchange_card_value = msg.get('exchange_card_value')
+        exchange_position = msg.get('exchange_position')
+
+        if None in [from_player_name, steal_position, exchange_card_value, exchange_position]:
+            print("Invalid steal request.")
+            return
+
+        i, j = steal_position
+        if not self.card_statuses[i][j]:
+            print(f"Cannot steal card at position ({i}, {j}) because it is not face-up.")
+            return
+
+        # Swap the cards
+        stolen_card = self.hand_grid[i][j]
+        self.hand_grid[i][j] = Card(exchange_card_value)
+        # The exchanged card is now face-down in the target player's hand
+        self.card_statuses[i][j] = False
+
+        # Update own hand
+        self.print_hand()
+
+        # Send hand update to other players
+        self.send_hand_update()
 
     def manage_turns(self):
         # Initialize cumulative scores
@@ -625,6 +600,8 @@ class Player:
         for hole in range(1, self.holes + 1):
             with self.lock:
                 self.current_hole = hole
+                self.hole_scores = {}      # Reset hole scores
+                self.hole_winner = None    # Reset hole winner
             print(f"\n{Colors.BOLD}{Colors.GREEN}=== Starting Hole {hole}/{self.holes} ==={Colors.RESET}")
             self.setup_hole()
             with self.lock:
@@ -730,7 +707,7 @@ class Player:
         print(f"\nScore for {self.name} in hole {self.current_hole}: {self.score}")
         if self.is_dealer:
             with self.lock:
-                self.scores[self.name] += self.score  # Accumulate dealer's own score
+                self.hole_scores[self.name] = self.score  # Store dealer's own hole score
                 self.scores_received = set([self.name])  # Include dealer's own name
             for player in self.players_info:
                 if player.username != self.name:
@@ -743,10 +720,17 @@ class Player:
                 missing_players = [p.username for p in self.players_info if p.username not in self.scores_received]
                 if missing_players:
                     print(f"{Colors.YELLOW}Did not receive scores from: {', '.join(missing_players)}{Colors.RESET}")
-            # Send end_hole message with current scores
+                # Update cumulative scores
+                for player_name, hole_score in self.hole_scores.items():
+                    self.scores[player_name] += hole_score
+                # Determine hole winner
+                self.hole_winner = min(self.hole_scores, key=self.hole_scores.get)
+            # Send end_hole message with current scores and hole scores
             end_hole_msg = {
                 'command': 'end_hole',
-                'scores': self.scores
+                'scores': self.scores,
+                'hole_scores': self.hole_scores,
+                'hole_winner': self.hole_winner
             }
             for player in self.players_info:
                 if player.username != self.name:
@@ -797,6 +781,8 @@ class Player:
         self.game_over = False
         self.hole_over = False
         self.other_players_hands = {}
+        self.hole_scores = {}
+        self.hole_winner = None
         if self.current_hole < self.holes:
             if self.is_dealer:
                 self.setup_hole()
@@ -839,6 +825,8 @@ class Player:
         self.game_id = None
         self.players_info = []
         self.scores = {}
+        self.hole_scores = {}
+        self.hole_winner = None
         self.hand = []
         self.hand_grid = []
         self.card_statuses = []
@@ -890,6 +878,15 @@ class Player:
                 print(f"{Colors.BOLD}{Colors.YELLOW}{player}: {score}{Colors.RESET}")
             else:
                 print(f"{player}: {score}")
+        print(f"{Colors.BOLD}{Colors.GREEN}\n=== Scores for Hole {self.current_hole} ==={Colors.RESET}")
+        for player, score in self.hole_scores.items():
+            if player == self.name:
+                # Highlight the current player's hole score
+                print(f"{Colors.BOLD}{Colors.YELLOW}{player}: {score}{Colors.RESET}")
+            else:
+                print(f"{player}: {score}")
+        if self.hole_winner:
+            print(f"{Colors.BOLD}{Colors.YELLOW}\nWinner of Hole {self.current_hole}: {self.hole_winner}{Colors.RESET}")
         if self.name in self.scores:
             print(f"{Colors.BOLD}{Colors.YELLOW}\nYour Current Player Score: {self.scores[self.name]}{Colors.RESET}")
         print("=" * 30)
@@ -918,19 +915,133 @@ class Player:
         print(f"{Colors.CYAN}1{Colors.RESET}. Draw from Stock")
         print(f"{Colors.CYAN}2{Colors.RESET}. Draw from Discard")
         if self.allow_steal:
-            print(f"{Colors.CYAN}3{Colors.RESET}. Steal a Card")
-        while True:
-            choice = input("Enter your choice (1-2" + ("-3" if self.allow_steal else "") + "): ").strip()
-            if choice in ['1', '2'] or (self.allow_steal and choice == '3'):
-                break
-            else:
-                print("Invalid choice. Please enter a valid option.")
+            print(f"{Colors.CYAN}3{Colors.RESET}. Steal a face-up card from another player")
+        choice = input("Enter your choice: ").strip()
         if choice == '1':
             self.draw_from_stock()
         elif choice == '2':
             self.draw_from_discard()
         elif choice == '3' and self.allow_steal:
-            self.steal_card()
+            self.perform_steal()
+        else:
+            print("Invalid choice. Turn skipped.")
+            self.end_turn()
+
+    def perform_steal(self):
+        # Display other players and their face-up cards
+        available_cards = []
+        for player_name, player_hand_info in self.other_players_hands.items():
+            face_up_positions = [(i, j) for i in range(2) for j in range(3) if player_hand_info['card_statuses'][i][j]]
+            if face_up_positions:
+                print(f"\n{player_name}'s face-up cards:")
+                for idx, (i, j) in enumerate(face_up_positions):
+                    card = player_hand_info['hand'][i*3 + j]
+                    card_idx = len(available_cards)  # Indexing over all available cards
+                    print(f"{card_idx + 1}. {self.format_card(card.value)} at position ({i}, {j})")
+                    available_cards.append({
+                        'player_name': player_name,
+                        'position': (i, j),
+                        'card': card
+                    })
+        if not available_cards:
+            print("No face-up cards available to steal.")
+            self.end_turn()
+            return
+
+        # Choose a card to steal
+        choice = input("Enter the number of the card you want to steal: ").strip()
+        try:
+            choice_idx = int(choice) - 1
+            if 0 <= choice_idx < len(available_cards):
+                target_info = available_cards[choice_idx]
+            else:
+                print("Invalid selection.")
+                self.end_turn()
+                return
+        except ValueError:
+            print("Invalid input.")
+            self.end_turn()
+            return
+
+        # Now, choose a face-down card from your own hand to give in exchange
+        face_down_positions = [(i, j) for i in range(2) for j in range(3) if not self.card_statuses[i][j]]
+        if not face_down_positions:
+            print("You have no face-down cards to exchange. Cannot perform steal action.")
+            self.end_turn()
+            return
+
+        print("\nChoose a face-down card from your hand to give in exchange:")
+        for idx, (i, j) in enumerate(face_down_positions):
+            print(f"{idx + 1}. Row {i}, Column {j}")
+        try:
+            exchange_idx = int(input("Enter the number of the card to exchange: ")) - 1
+            if not (0 <= exchange_idx < len(face_down_positions)):
+                print("Invalid position selected. Turn skipped.")
+                self.end_turn()
+                return
+            exchange_position = face_down_positions[exchange_idx]
+        except ValueError:
+            print("Invalid input. Turn skipped.")
+            self.end_turn()
+            return
+
+        # Get the exchange card value
+        i, j = exchange_position
+        exchange_card = self.hand_grid[i][j]
+
+        # Prepare and send steal request
+        msg = {
+            'command': 'steal_request',
+            'from_player': self.name,
+            'steal_position': target_info['position'],
+            'exchange_card_value': exchange_card.value,
+            'exchange_position': exchange_position
+        }
+        target_player = next((p for p in self.players_info if p.username == target_info['player_name']), None)
+        if target_player:
+            # Send the steal request to the target player
+            self.send_message(msg, target_player.ip, target_player.p_port)
+            # Update our own hand
+            # Swap our face-down card with the stolen card
+            i, j = exchange_position
+            self.hand_grid[i][j] = target_info['card']
+            self.card_statuses[i][j] = True  # The swapped-in card is now face-up
+
+            # Update other player's hand in our records
+            other_player_hand_info = self.other_players_hands[target_info['player_name']]
+            other_i, other_j = target_info['position']
+            other_player_hand_info['hand'][other_i*3 + other_j] = exchange_card
+            # The exchanged card is now face-down in the other player's hand
+            other_player_hand_info['card_statuses'][other_i][other_j] = False
+
+            # Send hand update to other players
+            self.send_hand_update()
+
+            # Print updated hand
+            self.print_hand()
+
+            # Check if all our cards are face-up
+            if self.is_all_cards_face_up():
+                if self.is_dealer:
+                    with self.lock:
+                        self.players_done.add(self.name)
+                    if self.check_hole_end():
+                        self.hole_over = True
+                else:
+                    self.notify_dealer_player_done()
+
+            self.end_turn()
+        else:
+            print("Target player not found.")
+            self.end_turn()
+
+    def is_all_cards_face_up(self):
+        return all([status for row in self.card_statuses for status in row])
+
+    def notify_dealer_player_done(self):
+        if not self.is_dealer:
+            msg = {'command': 'player_done', 'player': self.name}
+            self.send_message(msg, self.dealer_info.ip, self.dealer_info.p_port)
 
     def draw_from_stock(self):
         with self.lock:
@@ -1000,127 +1111,6 @@ class Player:
                     self.hole_over = True
             else:
                 self.notify_dealer_player_done()
-        self.end_turn()
-
-    def is_all_cards_face_up(self):
-        return all([status for row in self.card_statuses for status in row])
-
-    def notify_dealer_player_done(self):
-        if not self.is_dealer:
-            msg = {'command': 'player_done', 'player': self.name}
-            self.send_message(msg, self.dealer_info.ip, self.dealer_info.p_port)
-
-    def steal_card(self):
-        if not self.allow_steal:
-            print("Stealing is not allowed in this game.")
-            self.end_turn()
-            return
-        print("\nPlayers you can steal from:")
-        with self.lock:
-            stealable_players = [p for p in self.players_info if p.username != self.name]
-        if not stealable_players:
-            print("No players available to steal from.")
-            self.end_turn()
-            return
-
-        for idx, player in enumerate(stealable_players):
-            print(f"{idx + 1}. {player.username}")
-        try:
-            target_idx = int(input("Enter the number of the player to steal from: ")) - 1
-            if not (0 <= target_idx < len(stealable_players)):
-                print("Invalid player selected. Turn skipped.")
-                self.end_turn()
-                return
-            target_player = stealable_players[target_idx]
-        except ValueError:
-            print("Invalid input. Turn skipped.")
-            self.end_turn()
-            return
-
-        # Choose the face-up card positions from the target player
-        target_hand_statuses = self.other_players_hands[target_player.username]['card_statuses']
-        face_up_positions = [(i, j) for i in range(2) for j in range(3) if target_hand_statuses[i][j]]
-        if not face_up_positions:
-            print(f"{target_player.username} has no face-up cards to steal.")
-            self.end_turn()
-            return
-
-        print("\nChoose a face-up card position to steal from the target player:")
-        for idx, (i, j) in enumerate(face_up_positions):
-            print(f"{idx + 1}. Row {i}, Column {j}")
-        try:
-            pos_idx = int(input("Enter the number of the position to steal: ")) - 1
-            if not (0 <= pos_idx < len(face_up_positions)):
-                print("Invalid position selected. Turn skipped.")
-                self.end_turn()
-                return
-            steal_position = face_up_positions[pos_idx]
-        except ValueError:
-            print("Invalid input. Turn skipped.")
-            self.end_turn()
-            return
-
-        # Now, choose a face-down card from your own hand to give in exchange
-        face_down_positions = [(i, j) for i in range(2) for j in range(3) if not self.card_statuses[i][j]]
-        if not face_down_positions:
-            print("You have no face-down cards to exchange. Cannot perform steal action.")
-            self.end_turn()
-            return
-
-        print("\nChoose a face-down card from your hand to give in exchange:")
-        for idx, (i, j) in enumerate(face_down_positions):
-            print(f"{idx + 1}. Row {i}, Column {j}")
-        try:
-            exchange_idx = int(input("Enter the number of the card to exchange: ")) - 1
-            if not (0 <= exchange_idx < len(face_down_positions)):
-                print("Invalid position selected. Turn skipped.")
-                self.end_turn()
-                return
-            exchange_position = face_down_positions[exchange_idx]
-        except ValueError:
-            print("Invalid input. Turn skipped.")
-            self.end_turn()
-            return
-
-        # Get the exchange card value
-        i, j = exchange_position
-        exchange_card = self.hand_grid[i][j]
-
-        # Send 'steal_card' command to the target player with the desired position and exchange card value
-        msg = {
-            'command': 'steal_card',
-            'from_player': self.name,
-            'steal_position': steal_position,  # Include desired position in the message
-            'exchange_card_value': exchange_card.value,
-            'exchange_position': exchange_position  # The position in the stealing player's own hand
-        }
-        self.send_message(msg, target_player.ip, target_player.p_port)
-
-        # Initialize event for synchronization
-        self.steal_event = threading.Event()
-        if self.steal_event.wait(timeout=20):  # Increased timeout to 20 seconds
-            with self.steal_lock:
-                response = self.steal_response
-            stolen_card_value = response.get('stolen_card_value')
-            if stolen_card_value is None:
-                print(f"{target_player.username} has no face-up card at the specified position to steal.")
-                self.end_turn()
-                return
-            else:
-                stolen_card = Card(stolen_card_value)
-                print(f"Stole {self.format_card(stolen_card.value)} from {target_player.username}.")
-
-                # Place the stolen card face-up at the exchange_position in own hand
-                i, j = exchange_position
-                self.hand_grid[i][j] = stolen_card
-                self.card_statuses[i][j] = True  # Card is now face-up
-
-                # Send hand update to other players
-                self.send_hand_update()
-
-                self.print_hand()
-        else:
-            print("No response from the target player. Turn skipped.")
         self.end_turn()
 
     def send_hand_update(self):

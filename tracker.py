@@ -45,7 +45,12 @@ class Tracker:
         return self.query_players()
 
     def cmd_start_game(self, msg):
-        return self.start_game(msg['player'], msg['n'], msg['#holes'], msg.get('allow_steal', False))
+        return self.start_game(
+            msg['player'], 
+            msg['n'], 
+            msg['#holes'], 
+            msg.get('allow_steal', False)  # Handle allow_steal
+        )
 
     def cmd_query_games(self, msg):
         return self.query_games()
@@ -91,10 +96,10 @@ class Tracker:
             players = [dealer] + available_players[:n]
             for player in players:
                 player.state = "in-play"
-            game = Game(dealer, players, self.game_id_counter, holes)
+            game = Game(dealer, players, self.game_id_counter, holes, allow_steal)
             self.games.append(game)
             self.game_id_counter += 1
-            print(f"DEBUG: Started game {game.id} with players: {[p.username for p in players]} and holes: {holes}")
+            print(f"DEBUG: Started game {game.id} with players: {[p.username for p in players]} and holes: {holes} (Steal Allowed: {allow_steal})")
 
             # Notify all assigned players about the game assignment
             assigned_game_msg = {
@@ -103,7 +108,7 @@ class Tracker:
                 "dealer": dealer.to_dict(),
                 "players": [player.to_dict() for player in players],
                 "holes": holes,
-                "allow_steal": allow_steal  # Include the steal option in the message
+                "allow_steal": allow_steal  # Include allow_steal
             }
             for player in players:
                 self.send_message_to_player(assigned_game_msg, player)
@@ -113,7 +118,8 @@ class Tracker:
                 "message": "Game started and players notified successfully",
                 "game_id": game.id,
                 "players": [player.to_dict() for player in players],
-                "holes": holes
+                "holes": holes,
+                "allow_steal": allow_steal
             }
 
     def send_message_to_player(self, msg, player):
